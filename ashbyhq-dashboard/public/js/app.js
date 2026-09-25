@@ -943,7 +943,9 @@ async function renderDevDataSync() {
     <div class="card">
       <b>Parallel automation worker</b>
       <p class="muted">Enabled: <b>${data.system.workerEnabled ? 'YES' : 'NO'}</b> ·
-        active browsers: <b>${ws.active ?? 0}/${ws.maxConcurrent ?? 0}</b> ·
+        active browsers: <b>${ws.active ?? 0}/${ws.maxConcurrent === null || ws.maxConcurrent === undefined ? '∞ uncapped' : ws.maxConcurrent}</b> ·
+        browser: <b>${ws.headless ? 'headless' : 'headed (visible)'}</b>${ws.startSpacingMs ? ` · starts spaced ${ws.startSpacingMs}ms` : ''} ·
+        ${ws.hostEnabled === false ? '<b style="color:var(--coral)">this host is pinned off (WORKER_ENABLED=false)</b> · ' : ''}
         engine: <span class="mono">${esc(ws.engine || '—')}</span></p>
       <div class="actions">
         <button class="green" id="btn-worker-on" ${data.system.workerEnabled ? 'disabled' : ''}>▶ Enable worker</button>

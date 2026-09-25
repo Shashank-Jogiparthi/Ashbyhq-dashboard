@@ -21,9 +21,16 @@ import {
 
 dotenv.config({ path: path.join(process.cwd(), '.env') });
 
-if (!process.env.CHROME_PATH) {
-  process.env.CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+// Windows convenience only: use the installed Chrome when the caller did not
+// set CHROME_PATH *and* that path actually exists. On a Linux container the
+// path is meaningless and every launch would fail with "executable doesn't
+// exist", so there we leave it unset and Playwright uses its own Chromium.
+const WINDOWS_CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+if (!process.env.CHROME_PATH && fs.existsSync(WINDOWS_CHROME)) {
+  process.env.CHROME_PATH = WINDOWS_CHROME;
 }
+// APPLY runs headed unless asked otherwise (see the launch site below).
+const APPLY_HEADLESS = process.env.APPLY_HEADLESS === 'true' || process.env.HEADLESS === 'true';
 
 chromium.use(StealthPlugin());
 
@@ -630,17 +637,25 @@ async function fillAshbyForm(jobUrl, resumePath) {
   console.log(`Applicant profile persisted under: ${applicantDir}`);
   console.log('Resume parsed successfully. Merging resume and optional database-backed applicant data for field coverage.');
 
+  // Headed by default: this is the path where Ashby's anti-spam filter watches
+  // for human behaviour, and a real window on a residential machine is the best
+  // signal available. APPLY_HEADLESS=true (or HEADLESS=true) runs it hidden, which
+  // is what a display-less container needs. Stealth is wired either way, so
+  // navigator.webdriver / headless UA tells are masked in both modes; what is NOT
+  // masked on a server is the datacenter IP, so treat headless APPLY as a
+  // throughput tradeoff, not a free win.
   const browser = await chromium.launch({
-    headless: false,
-    executablePath: process.env.CHROME_PATH,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--start-maximized']
+    headless: APPLY_HEADLESS,
+    executablePath: process.env.CHROME_PATH || undefined,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', ...(APPLY_HEADLESS ? [] : ['--start-maximized'])]
   });
 
   const context = await browser.newContext({
     // viewport: null => the page fills the real (maximized) window instead of a
     // fixed 1920x1080 canvas that overflows a laptop screen and hides the bottom
-    // of the form. Override with HEADLESS=true on a server where nothing is shown.
-    viewport: null,
+    // of the form. A headless run has no window at all, so give it a
+    // desktop-sized viewport - the form's lazy sections only render on-screen.
+    viewport: APPLY_HEADLESS ? { width: 1366, height: 900 } : null,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     locale: 'en-US',
     timezoneId: 'America/New_York'
@@ -790,7 +805,7 @@ async function scanApplicationForm(jobUrl) {
   const headless = process.env.SCAN_HEADLESS !== 'false';
   const browser = await chromium.launch({
     headless,
-    executablePath: process.env.CHROME_PATH,
+    executablePath: process.env.CHROME_PATH || undefined,
     args: ['--no-sandbox', '--disable-setuid-sandbox', ...(headless ? [] : ['--start-maximized'])]
   });
   const context = await browser.newContext({

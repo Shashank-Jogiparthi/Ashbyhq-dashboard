@@ -30,15 +30,37 @@ import {
 const WORKSPACE_ROOT = path.resolve(ROOT_DIR, '..');
 const ENGINE_PATH = process.env.ENGINE_PATH
   || path.join(WORKSPACE_ROOT, 'ashby-hybrid-automation.js');
-const MAX_CONCURRENT = Math.max(1, Number(process.env.MAX_CONCURRENT_RUNS || 4));
+// How many apply browsers this worker drives at once. 0 / -1 / "unlimited"
+// removes the cap entirely: every QUEUED row is claimed and launched, so the
+// only ceiling left is the machine itself (one Chromium per run).
+const RAW_MAX = String(process.env.MAX_CONCURRENT_RUNS ?? '4').trim().toLowerCase();
+const MAX_CONCURRENT = ['0', '-1', 'unlimited', 'none', 'infinity'].includes(RAW_MAX)
+  ? Infinity
+  : Math.max(1, Number(RAW_MAX) || 4);
 const POLL_MS = Math.max(2000, Number(process.env.WORKER_POLL_MS || 8000));
+// Headed is still the engine default; the child inherits our env, so setting
+// APPLY_HEADLESS here (or in .env) is what makes apply runs headless.
+const HEADLESS_APPLY = process.env.APPLY_HEADLESS === 'true' || process.env.HEADLESS === 'true';
+// With no cap, one tick would launch every queued browser inside the same
+// second: a RAM spike plus a bot-shaped stampede of identical simultaneous page
+// loads. Space the STARTS (they still all run concurrently afterwards). Ignored
+// while a cap exists, because the cap already paces them.
+const START_SPACING_MS = Number.isFinite(MAX_CONCURRENT)
+  ? 0 : Math.max(0, Number(process.env.RUN_START_SPACING_MS ?? 1500));
 // Runs use an OS temp dir OUTSIDE the repo so no applicant artefact (profile,
 // answers, downloaded resume, engine job-status JSON, screenshots) ever lands
 // in the working tree. The whole per-run dir is deleted the moment the run
 // finishes; the only durable record is the text status/reason in Supabase.
 const RUNS_DIR = process.env.RUN_TMP_DIR || path.join(os.tmpdir(), 'applywizz-runs');
+// Per-host brake. The enabled flag lives in a SHARED database, so the DEV
+// "Disable worker" button stops every machine at once. WORKER_ENABLED=false is
+// the opposite: it silences THIS process only and never writes the shared row,
+// so a container can be pinned to "never drive a browser" while the operator's
+// workstation keeps claiming runs (and vice versa).
+const HOST_OPT_OUT = String(process.env.WORKER_ENABLED || '').toLowerCase() === 'false';
 
 const active = new Set();          // application ids in flight
+const scheduled = new Set();       // ids with a staggered launch still pending
 let pollTimer = null;
 let started = false;
 
@@ -46,9 +68,12 @@ export async function workerStatus() {
   return {
     started,
     active: active.size,
-    maxConcurrent: MAX_CONCURRENT,
+    maxConcurrent: Number.isFinite(MAX_CONCURRENT) ? MAX_CONCURRENT : null,
+    headless: HEADLESS_APPLY,
+    startSpacingMs: START_SPACING_MS,
     engine: fs.existsSync(ENGINE_PATH) ? ENGINE_PATH : 'MISSING',
-    enabled: await getSystemState('worker_enabled') === 'true'
+    hostEnabled: !HOST_OPT_OUT,
+    enabled: !HOST_OPT_OUT && await getSystemState('worker_enabled') === 'true'
   };
 }
 
@@ -57,7 +82,9 @@ export async function start() {
   started = true;
   fs.mkdirSync(RUNS_DIR, { recursive: true });
   pollTimer = setInterval(() => { tick().catch((e) => console.error('worker tick:', e.message)); }, POLL_MS);
-  console.log(`Worker started (max ${MAX_CONCURRENT} concurrent browsers, poll ${POLL_MS}ms).`);
+  console.log(`Worker started (${Number.isFinite(MAX_CONCURRENT) ? `max ${MAX_CONCURRENT}` : 'unlimited'} concurrent browsers, `
+    + `headless ${HEADLESS_APPLY ? 'on' : 'off (visible windows)'}${START_SPACING_MS ? `, starts spaced ${START_SPACING_MS}ms` : ''}, poll ${POLL_MS}ms).`);
+  if (HOST_OPT_OUT) console.log('Worker idle: WORKER_ENABLED=false for this host (shared queue untouched).');
   tick();
   return workerStatus();
 }
@@ -75,14 +102,28 @@ export async function stop() {
 export function kick() { tick().catch((e) => console.error('worker kick:', e.message)); }
 
 async function tick() {
+  if (HOST_OPT_OUT) return;
   if (await getSystemState('worker_enabled') !== 'true') return;
   const free = MAX_CONCURRENT - active.size;
   if (free <= 0) return;
-  const queued = (await listQueuedForWorker()).filter((a) => !active.has(a.id));
+  const queued = (await listQueuedForWorker())
+    .filter((a) => !active.has(a.id) && !scheduled.has(a.id));
   // Fire each launch without awaiting: awaiting serialises the browsers, which
   // is exactly what the concurrency budget exists to avoid. Keep a catch so a
-  // rejected launch never becomes an unhandled rejection.
-  for (const app of queued.slice(0, free)) launch(app).catch((e) => console.error('launch:', e.message));
+  // rejected launch never becomes an unhandled rejection. Re-scheduling the
+  // same row on a later tick is harmless anyway - claimForRun is an atomic
+  // "QUEUED -> APPLYING" UPDATE, so only one launch can ever win an application.
+  queued.slice(0, free).forEach((app, i) => {
+    if (!START_SPACING_MS) {
+      launch(app).catch((e) => console.error('launch:', e.message));
+      return;
+    }
+    scheduled.add(app.id);
+    setTimeout(() => {
+      scheduled.delete(app.id);
+      launch(app).catch((e) => console.error('launch:', e.message));
+    }, i * START_SPACING_MS);
+  });
 }
 
 async function launch(app) {

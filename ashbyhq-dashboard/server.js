@@ -97,6 +97,9 @@ if (await getSystemState('worker_enabled') === null) {
   await setSystemState('worker_enabled', String(process.env.WORKER_ENABLED === 'true'));
 }
 if (process.env.WORKER_ENABLED === 'true') await setSystemState('worker_enabled', 'true');
+// WORKER_ENABLED=false deliberately does NOT write here: the flag lives in a
+// shared database, so a per-host brake belongs in the worker itself (see
+// HOST_OPT_OUT in worker/runner.js), not in the row every other host reads.
 worker.start().catch((e) => console.error('worker start:', e.message)); // poll loop always runs; it only CLAIMS when worker_enabled=true
 startScanWorker();                          // pre-scan queue: claims link_scan_jobs rows
 // Privacy sweep: the draft pass caches parsed resume text on disk. A successful
