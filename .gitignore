@@ -1,0 +1,12 @@
+node_modules/
+.env
+*.log
+automation-screenshots/*.png
+resume-analysis-results/*.json
+ashby-analysis-results/*.json
+# Applicant run artefacts must NEVER live in the repo (runs use the OS temp dir).
+applicant-data/
+data/runs/
+# Parsed resume text for the draft pass (applicant data, erased after success).
+**/data/resume-cache/
+*.pdf

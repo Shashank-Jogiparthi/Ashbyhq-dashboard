@@ -1,0 +1,26 @@
+{
+  "name": "ashbyhq-dashboard",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "ASHBYHQ multi-role application platform - CA / OPS / DEV dashboards (email + one-time-code auth), OPS assignment pool with per-OPS quota, Azure-Postgres applicant connector, and a parallel spawn-per-Apply automation worker",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "seed": "node scripts/seed.js",
+    "setup:storage": "node scripts/setup-storage.js",
+    "storage:check": "node scripts/check-storage.js",
+    "verify:flow": "node scripts/verify-flow.js",
+    "setup:links": "node scripts/setup-link-tables.js",
+    "scan:link": "node scripts/scan-link.js",
+    "normalize:links": "node scripts/normalize-link-urls.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "pg": "^8.13.1"
+  },
+  "optionalDependencies": {}
+}

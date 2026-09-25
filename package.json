@@ -1,0 +1,17 @@
+{
+  "name": "ashby-hybrid-automation",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node ashby-hybrid-automation.js",
+    "dev": "node ashby-hybrid-automation.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.16.0",
+    "dotenv": "^17.4.2",
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.63.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}

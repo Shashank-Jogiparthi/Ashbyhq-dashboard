@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ApplyWizz — ASHBYHQ · Sign in</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="card auth-card">
+      <div class="muted" style="letter-spacing:2px;font-weight:800;">APPLYWIZZ / ASHBYHQ</div>
+      <h1>Sign in or Sign up</h1>
+      <p class="muted">Enter your work email and the role you work as. A one-time code is sent to your email (Microsoft authenticator flow) — in this local build the code is printed on the server console.</p>
+
+      <!-- STEP 1: identity -->
+      <div id="step-identity">
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" type="email" placeholder="you@applywizz.local" autocomplete="username" />
+        </div>
+        <div id="signup-fields">
+          <div class="field">
+            <label for="name">Full name</label>
+            <input id="name" type="text" placeholder="Only needed for new accounts" />
+          </div>
+          <div class="field">
+            <label for="role">Sign in as</label>
+            <select id="role">
+              <option value="ca">CA — Career Associate</option>
+              <option value="ops">OPS — Operational Manager</option>
+              <option value="dev">DEV — Developer</option>
+              <option value="admin">ADMIN — Organization Admin</option>
+            </select>
+            <p class="muted" style="margin:6px 0 0;font-size:12px;">ADMIN: only the first ADMIN can be created here; further admins are promoted by an existing ADMIN from the Staff tab.</p>
+          </div>
+          <div class="field hidden" id="ops-field">
+            <label for="ops">Your OPS manager (who you work under)</label>
+            <select id="ops"></select>
+          </div>
+        </div>
+        <div id="identity-msg"></div>
+        <button class="primary" id="btn-send-code" style="width:100%;">Send one-time code →</button>
+      </div>
+
+      <!-- STEP 2: code -->
+      <div id="step-code" class="hidden">
+        <div class="ok-box">Code sent to <b id="sent-to"></b>. <span id="new-account-note"></span></div>
+        <div class="field">
+          <label for="code">6-digit authenticator code</label>
+          <input id="code" inputmode="numeric" maxlength="6" placeholder="••••••" style="letter-spacing:8px;font-size:20px;" />
+        </div>
+        <div id="code-msg"></div>
+        <div style="display:flex;gap:8px;">
+          <button id="btn-back">← Back</button>
+          <button class="green" id="btn-verify" style="flex:1;">Verify &amp; open dashboard</button>
+        </div>
+        <p class="muted" style="margin-top:12px;">Code expires in 5 minutes. Didn't get it? Go back and request a new one.</p>
+      </div>
+    </div>
+  </div>
+  <script src="/js/auth.js"></script>
+</body>
+</html>

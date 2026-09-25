@@ -1,0 +1,668 @@
+ASHBYHQ MULTI-ROLE PLATFORM - CURRENT STATE & FILE GUIDE (v3.2)
+================================================================
+Status: BUILT + VERIFIED. v3.1 added the EXTERNAL APPLICANT DB
+(Azure Postgres) connector, the CAM-ASSIGNMENT POOL with per-CAM
+QUOTA, and the PARALLEL spawn-per-Apply automation WORKER; v3.2
+records those builds in EVERY section (0-8 now describe the
+post-v3.1 reality, not the old skeleton) and adds the DEV Staff
+tab's CONFIRM-GATED CAM change (section 10). Section 9 remains the
+deep-dive on the external-DB + parallel-automation design.
+
+====================================================================
+0. WHAT CHANGED vs THE v2 PLAN (and why)
+====================================================================
+ v2 said                       v3 reality (now)
+ ----------------------------  -------------------------------------
+ NO login/auth at all          Email + 6-digit one-time-code auth
+                               (Microsoft-Authenticator style flow,
+                               mailer is a console stub). Re-added
+                               because you requested a sign-in /
+                               sign-up skeleton with role selection.
+ ADMIN + DEV separate roles    ADMIN folded into DEV for now (schema
+                               CHECK only allows ca|cam|dev). DEV has
+                               the union: health, worker toggle,
+                               re-queue/force-fail, raw tables, staff.
+ Identity switcher (trust)     Real bearer-token sessions (12h) in
+                               SQLite. Server scopes EVERY query.
+ Port 3000                     Port 3100 (localhost bind only).
+ better-sqlite3                Node 24 built-in node:sqlite — zero
+                               native-build risk on Windows.
+ Separate files (queries.js,   One db/store.js holds state machine +
+ routes.js, per-role js)       all business logic; one server.js holds
+                               all routes; one public/js/app.js holds
+                               all three dashboards (tab renderers per
+                               role). Fewer files = smaller surface at
+                               skeleton stage; split later if needed.
+ (no theme policy)             Theme lives ONLY in public/css/style.css
+                               with stable class names — restyling
+                               never touches JS/markup. Current theme:
+                               "Pop Poster" (powder-blue canvas, navy
+                               ink, coral/mint/butter/lilac accents).
+ Everything else from v2 (CA-first decisions, no Supabase, no mail
+ detection, no resume storage, AM = data only, skip = terminal for
+ CA, local-only) still holds.
+ OBSOLETE from v2 (killed by v3.1): "job links pre-seeded" (links
+ now stream from the external DB as AWL-ID -> url pairs) and any
+ AM-side assignment notion (applicant -> CA attachment is now a
+ CAM action under a DEV-set per-CAM quota).
+ v3.1 (now)    Azure Postgres connector + CAM assignment pool +
+               parallel spawn-per-Apply worker (section 9).
+ v3.2 (now)    DEV Staff tab CAM re-assignment is CONFIRM-GATED:
+               the dropdown alone never saves - a "Change CAM:
+               old -> new" indicator + checkbox + Save is required
+               (section 10).
+
+====================================================================
+1. HARD CONSTRAINTS (UNCHANGED FROM v2 UNLESS MARKED)
+====================================================================
+- Pure JavaScript, Node ESM. Base layer (ashby-hybrid-automation.js
+  engine) untouched at workspace root; platform lives entirely in
+  ashbyhq-dashboard/ (folder isolation is a rule).
+- 100% LOCAL. Server binds 127.0.0.1:3100. No cloud, no Supabase.
+- NO resume storage by us. applicants.resume_address only.
+- CA is the decision start point: APPLY or SKIP(reason). Nothing
+  runs before a CA clicks APPLY.
+- [CHANGED v3.1] Job links arrive from the external DB as
+  (AWL-ID -> url) pairs and sit in applicant_joblinks until the
+  CAM assigns the applicant; only then do they MATERIALISE into
+  ASSIGNED applications. No manual add-link UI yet.
+- [CHANGED v3.1] Applicant -> CA attachment is a CAM action,
+  capped by a per-CAM applicant_quota only DEV may raise. AM
+  remains data-only (ams table shown on cards; no login).
+- [NEW v3.1] Concurrency is bounded ONLY by MAX_CONCURRENT_RUNS
+  (host RAM/CPU); within the cap every run is its own spawned
+  browser child process - no queue ordering, no shared state,
+  no engine modifications.
+- [NEW v3.1] The resume file is downloaded per run to
+  data/runs/<run-id>/ and DELETED on close - we still store only
+  the address.
+- [CHANGED] Auth now exists, but codes go to the CONSOLE (stub),
+  there are no passwords, and accounts self-create at sign-up.
+- [NEW] CAM overrides: a CAM can reassign CA and force ANY status
+  (bypassing the state machine) inside their own tree, reason
+  mandatory, every override audited in application_events.
+- [NEW v3.2] DEV CAM re-assignment of a CA is confirm-gated in
+  the UI (pending indicator + checkbox + Save). The API itself
+  stays a plain DEV endpoint - trust-but-confirm is a UI rule.
+
+====================================================================
+2. AUTH FLOW (WHAT / HOW / WHY)
+====================================================================
+ Step 1  POST /api/auth/request-code {email, name?, role?, managerId?}
+   - Existing email  -> SIGN-IN. Role comes from the staff record.
+     The dropdown is IGNORED (the sign-in screen now says so:
+     "Existing <ROLE> account - the role is fixed at sign-up").
+   - New email       -> SIGN-UP with the chosen role.
+     CA requires selecting an existing CAM (400 otherwise).
+     CAM/DEV need no manager.
+   - Issues 6-digit code (5-min TTL, max 5 wrong attempts,
+     single active code per email via upsert), prints it through
+     core/mailer.js stub.
+ Step 2  POST /api/auth/verify-code {email, code}
+   - Correct code -> row deleted (single use) -> session token
+     (uuid) stored in sessions table, 12h TTL -> returned to the
+     browser which keeps it in localStorage('awl_token').
+ Step 3  Every /api/* call sends "Authorization: Bearer <token>";
+   server resolves it to the staff row; expired/invalid -> 401 ->
+   client clears token and redirects to sign-in.
+
+ WHY: proves the full identity->role->scoped-dashboard pipeline
+ without passwords; swapping in a real mail sender later = edit
+ ONE function in core/mailer.js. Restriction: an email can never
+ change role after creation (no role-change UI yet, even for DEV).
+
+====================================================================
+3. STATE MACHINE + WHO MAY DO WHAT
+====================================================================
+ ASSIGNED -> QUEUED            CA APPLY (owner only) | CAM/DEV apply
+ ASSIGNED -> FAILED            CA SKIP+reason (owner) | CAM/DEV
+ QUEUED   -> APPLYING          worker claim (claimForRun atomic,
+                               v3.1 - guarded UPDATE, run_id+attempts)
+ QUEUED   -> FAILED            DEV force-fail
+ APPLYING -> SUCCESS/PENDING/FAILED   worker result mapping (v3.1:
+                               engine jobs/*.json status -> state)
+ PENDING  -> SUCCESS/FAILED    DEV resolve
+ FAILED   -> QUEUED            DEV re-queue only
+ SUCCESS  -> (terminal)
+
+ transition() in db/store.js enforces edges (Illegal transition
+ errors are returned, not silently ignored) AND writes an
+ application_events row per change.
+
+ ROLE / PERMISSION MATRIX (all enforced server-side, not just UI):
+ CA   sees+acts: own applications (ca_id = me). APPLY/SKIP on own
+      ASSIGNED rows. Applicants attached to me (card shows AM name +
+      "under CAM X" as info only).
+ CAM  sees: entire tree (denormalized manager_id on every app row).
+      acts: APPLY/SKIP anywhere in tree, CA Overview drill-down,
+      Job Links matrix, REASSIGN CA (tree-only - cross-tree blocked
+      400/403), FORCE STATUS any->any (reason required, audited),
+      [v3.1] ASSIGN applicants from their pool to a CA - quota-
+      capped (assigned >= quota -> 400), which materialises that
+      applicant's pending job links into ASSIGNED applications.
+      cannot: see another CAM's tree, reassign to another tree's CA,
+      raise their own quota.
+ DEV  sees: everything, everyone. Acts: all CA/CAM powers +
+      re-queue / force-fail / resolve PENDING, worker enable/disable
+      (+ live active/maxConcurrent readout), [v3.1] Postgres sync,
+      single-doc JSON ingest, per-CAM applicant_quota setting,
+      [v3.2] CA -> CAM re-assignment via the confirm-gated Staff
+      tab, raw table inspector (whitelisted tables, read-only),
+      full event stream.
+ WORKER (v3.1, actor 'worker'): claim QUEUED -> APPLYING, map run
+      outcome -> SUCCESS/PENDING/FAILED, crash -> FAILED. Only runs
+      while system_state.worker_enabled = 'true'.
+ AM   no login, no actions - linkage data only.
+
+ WHY denormalized ca_id/manager_id on applications: one WHERE
+ clause per role scope, no recursive joins, scoping cannot leak.
+ WHY CAM force-status bypasses the machine: ops reality - a CAM
+ may know a recruiter confirmed receipt (ASSIGNED->SUCCESS); the
+ mandatory reason + cam_force_status event keeps it accountable.
+
+====================================================================
+4. DATA MODEL (db/schema.sql - actual, applied on boot)
+====================================================================
+ staff(uuid PK, email UNIQUE, name, role CHECK ca|cam|dev,
+       manager_id ->staff.uuid NULL,
+       applicant_quota INT DEFAULT 25,  -- v3.1 per-CAM cap DEV sets
+       ext_id,                          -- v3.1 external Postgres staff uuid
+       active, last_sign_in, created_at)
+ ams(uuid PK, name, email)
+ otp_codes(email PK, code, expires_at, attempts, created_at)
+ sessions(token PK, staff_uuid, created_at, expires_at)
+ job_links(id PK AUTO, company, title, url UNIQUE, url_hash,
+           link_status valid|expired|already_applied, seeded_at)
+ applicants(awl_id PK, full_name, email, phone, am_id,
+            ca_id,        -- set by the CAM since v3.1 (was AM-side)
+            cam_id,       -- v3.1 owning CAM whose pool it sits in
+            ext_id,       -- v3.1 external client UUID from Postgres
+            assigned_at,  -- v3.1 when a CA was attached
+            resume_address, profile_json, source_updated_at)
+ applicant_joblinks(id PK, awl_id, url, company, title,
+            materialized 0|1, added_at)   -- v3.1
+            -- (AWL-ID -> link) pairs streamed from the external DB;
+            -- stay pending until the CAM assigns, then materialise
+            -- into ASSIGNED applications (section 9)
+ applications(id PK, awl_id, link_id, ca_id, manager_id,
+   status ASSIGNED|QUEUED|APPLYING|SUCCESS|PENDING|FAILED
+   (state machine enforced in store.js, not by SQL CHECK),
+   skip_reason, fail_reason, run_id, attempts,
+   screenshot_path, resolution_log_json,  -- v3.1 worker outputs
+   decision_by, decision_at, queued_at, finished_at,
+   created_at, updated_at, UNIQUE(awl_id, link_id))
+ application_events(id, application_id NULL, type, actor,
+           payload_json, ts)          -- audit spine for all actions
+ system_state(key PK, value, updated_at)  -- worker_enabled etc.
+ Indexes: applications(ca_id,status), (manager_id,status),
+ applicants(ca_id), events(application_id),
+ applicant_joblinks(awl_id, materialized)  -- v3.1 pending scan
+
+ migrate() = schema.sql PLUS idempotent ensureColumn() ALTERs
+ (v3.1): an existing app.db upgrades in place - no data reset
+ needed between versions. New tables ride CREATE IF NOT EXISTS.
+ Restriction: readTable() exposes only a whitelist (now including
+ applicant_joblinks) and only to DEV.
+
+====================================================================
+5. FILE-BY-FILE GUIDE (what / how / why / restrictions)
+====================================================================
+ ashbyhq-dashboard/
+ |- server.js               ~355 lines. Express 5, all routes.
+ |   WHAT: boot+migrate, WORKER WIRING (v3.1: worker.start() on
+ |   boot - the poll loop is a backstop that only CLAIMS while
+ |   system_state.worker_enabled='true'; WORKER_ENABLED env seeds
+ |   the flag on first boot), bearer-auth middleware (requireAuth,
+ |   requireRole), async-safe error wrapper (wrap/HttpError ->
+ |   JSON), and the full REST surface:
+ |     /api/auth/*            request-code, verify-code, logout, me
+ |     /api/public/cams       CAM list for the sign-up dropdown
+ |     /api/ca/applicants     role-scoped (CA|CAM|DEV share route)
+ |     /api/ca/applications   scoped list, ?status=&awlId= filters
+ |     /api/applications/:id  detail (+ /apply -> ALSO worker.kick()
+ |                            so a browser starts instantly, /skip)
+ |     /api/cam/team          my CAs (DEV: ?managerId=<cam>)
+ |     /api/cam/overview      tree counters/cas/apps/events
+ |                            (DEV may pass ?managerId=)
+ |     /api/cam/applications/:id/reassign      {caUuid, moveApplicant}
+ |     /api/cam/applications/:id/force-status  {status, reason}
+ |     /api/cam/pool   [v3.1] unassigned pool + quota usage + my CAs
+ |     /api/cam/assign [v3.1] {awlId, caUuid} quota-checked; then
+ |                            materialises the applicant's links
+ |     /api/team/ca/:uuid     CA drill-down (CAM: own tree only)
+ |     /api/activity          scope-filtered event feed
+ |     /api/dev/*             overview (now + applicantQuota,
+ |                            workerStatus, connector health),
+ |                            table/:name, events, requeue,
+ |                            force-fail, resolve, worker enable/
+ |                            disable, sync [v3.1 Postgres pull],
+ |                            ingest [v3.1 single JSON doc],
+ |                            staff/:uuid/manager,
+ |                            staff/:uuid/quota [v3.1]
+ |   HOW: routes are thin; ALL logic lives in store.js so the same
+ |   functions serve HTTP AND the worker - one source of truth for
+ |   claims, transitions and audit events (no HTTP loopback).
+ |   RESTRICTIONS: localhost bind only; every mutating route
+ |   requires a valid session; role checks are per-route AND
+ |   per-row (out-of-scope row access = 403, not filtered silence).
+ |
+ |- db/
+ |  |- index.js     WHAT: opens node:sqlite data/app.db (WAL), runs
+ |                  migrate() = schema.sql + ensureColumn() ALTERs
+ |                  (v3.1 - upgrades an existing db in place: the six
+ |                  new columns land without losing demo data);
+ |                  exports db, nowIso, uuid, ROOT_DIR, DATA_DIR.
+ |                  WHY import.meta.url paths: works from any cwd.
+ |     |------------
+ |  |- schema.sql   WHAT/WHY: section 4. CHECK constraints make bad
+ |                  states unrepresentable at the storage layer too.
+ |     |------------
+ |  |- store.js     ~630 lines. THE ONLY place business rules live.
+ |                  WHAT by block:
+ |                   LEGAL_TRANSITIONS + canTransition() + transition()
+ |                     - state machine, event-logged
+ |                   HttpError                    - status+message errors
+ |                   logEvent/listEvents          - audit spine, scope
+ |                     filtered by ca_id/manager_id via joins
+ |                   staff CRUD + OTP + sessions  - auth section 2
+ |                   getApplicantsForCa/Manager/All, APP_SELECT (one
+ |                     join view: app + link + applicant + names),
+ |                     getApplications (scope + filters),
+ |                     statusCounters (per-role, same scopeCondition)
+ |                   applyApplication/skipApplication + assertCanDecide
+ |                     - CA own-row only; reason mandatory on skip;
+ |                     skip stamps fail_reason "Skipped by CA: ..."
+ |                   CAM CONTROLS: listCasForManager, camReassignCa
+ |                     (tree guard; moveApplicant=true moves the
+ |                     applicant record + ALL their applications),
+ |                     camForceStatus (any->any, reason required,
+ |                     stamps finished_at/fail_reason appropriately,
+ |                     never uses transition() - explicit override
+ |                     semantics with its own event type)
+ |                   caSummary - one CA's counters+applicants+apps+
+ |                     events for drill-down views
+ |                   ASSIGNMENT POOL [v3.1]: getQuotaUsage (assigned
+ |                     vs cap per CAM), getUnassignedPool (ca_id NULL
+ |                     in this CAM's pool + pending-link counts),
+ |                     assignApplicantToCa (tree + quota guards ->
+ |                     sets ca_id/cam_id/assigned_at -> materialises),
+ |                     materializeJoblinks (pending links -> job_links
+ |                     upsert + ASSIGNED applications, marks
+ |                     materialized=1), upsertApplicantJoblink (new
+ |                     pair from connector; materialises immediately
+ |                     only if a CA is already attached),
+ |                     upsertExternalApplicant (insert/refresh from
+ |                     Postgres - PRESERVES existing ca_id),
+ |                     updateStaffQuota, findStaffByExtId
+ |                   WORKER SUPPORT [v3.1]: listQueuedForWorker,
+ |                     claimForRun (guarded UPDATE QUEUED->APPLYING +
+ |                     run_id + attempts - race-safe), finishRun
+ |                     (outcome map through transition() so every
+ |                     result is audited), markRunCrash
+ |                   DEV CONTROLS: devRequeue (FAILED->QUEUED clears
+ |                     reasons), devForceFail, devResolvePending,
+ |                     readTable (whitelist incl. applicant_joblinks),
+ |                     get/setSystemState
+ |                  WHY one file: splitting scope logic across files
+ |                  risks two sources of truth for scoping
+ |                  (scopeCondition is imported everywhere) - the
+ |                  worker deliberately reuses these exact functions.
+ |                  RESTRICTIONS: no raw SQL escapes this module;
+ |                  quota guard counts ONLY assigned (ca_id NOT NULL)
+ |                  applicants - pool rows don't consume quota.
+ |
+ |- core/
+ |  |- mailer.js    WHAT: sendAuthCode(email, code) prints a boxed
+ |                  code to the server console. WHY: decouples the
+ |                  auth flow from SMTP; the ONE swap-point later.
+ |                  RESTRICTION: codes are console-visible locally -
+ |                  fine for a local tool, must be replaced before
+ |                  anything multi-user/remote.
+ |
+ |- connector/      [v3.1] applicant-db.js - the Azure Postgres
+ |                  bridge. WHAT: pgConfig() (PG_* env or
+ |                  PG_CONNECTION_STRING), isConfigured(),
+ |                  mapApplicantDoc() - normalises the exact
+ |                  { client, additional_information } demographic
+ |                  shape into the engine-native profile (personal /
+ |                  contact / education / skills / projects /
+ |                  experience / answers incl. visa->workAuthorization,
+ |                  sponsorship, veteran/gender/race knockouts,
+ |                  linkedin/github/gpa) and keeps ONLY the resume
+ |                  S3 address; syncFromPostgres() streams whole
+ |                  table (PG_APPLICANTS_QUERY/TABLE + optional
+ |                  PG_LINKS_QUERY for (applywizz_id,url) pairs);
+ |                  ingestDocument() loads ONE exported JSON (works
+ |                  with no DB - used in the DEV UI + e2e tests);
+ |                  resolveCamFromExternal() maps
+ |                  client.careerassociatemanagerid -> local CAM via
+ |                  staff.ext_id.
+ |                  HOW: `pg` is imported LAZILY inside
+ |                  syncFromPostgres only.
+ |                  WHY: server + tests boot fine with zero Postgres
+ |                  setup; the demographic doc needs no translation
+ |                  layer because the base engine already understands
+ |                  this exact shape (normalizeApplicantPayload).
+ |                  RESTRICTION: never writes ca_id (assignment is
+ |                  the CAM's job); pool lands under cam_id only.
+ |
+ |- worker/         [v3.1] runner.js - the PARALLEL automation driver
+ |                  (~200 lines). WHAT: start/stop/kick + workerStatus;
+ |                  tick() claims up to (MAX_CONCURRENT - active)
+ |                  QUEUED rows and spawn()s ONE child process of the
+ |                  untouched base engine per row, each with its own
+ |                  APPLICANT_DATA_DIR under data/runs/<runId>/store
+ |                  and its profile via PERSON_PROFILE_PATH /
+ |                  APPLICANT_DB_PATH env; resolveResume() downloads
+ |                  the S3 resume to the run dir; on close
+ |                  readLatestResult() scans jobs/*.json, finishRun()
+ |                  maps success/failed/unknown/manual-review/crash ->
+ |                  SUCCESS/FAILED/PENDING, cleanupResume() DELETES
+ |                  the downloaded file.
+ |                  HOW: concurrency = N independent browsers, no
+ |                  shared state, no ordering; the poll loop is only a
+ |                  backstop - worker.kick() on APPLY is the trigger.
+ |                  WHY spawn-not-refactor: keeps the proven 820-line
+ |                  engine untouched (folder-isolation rule) and gets
+ |                  true parallelism for free.
+ |                  RESTRICTIONS: claims nothing unless
+ |                  worker_enabled='true'; MAX_CONCURRENT_RUNS caps
+ |                  simultaneous browsers (default 4 - each is a
+ |                  HEADED Chrome; size to the host).
+ |
+ |- scripts/
+ |  |- seed.js      WHAT: idempotent demo data - 2 CAMs (Priya,
+ |                  Arjun), 3 CAs (rakesh+sana / sugurudheeraj),
+ |                  dev@, 2 AMs, 6 applicants (AWL-31408..31832),
+ |                  8 Ashby job links (one expired Linear), 12
+ |                  applications covering EVERY status.
+ |                  HOW: skips if staff already seeded; run via
+ |                  `npm run seed`. WHY fixed demo names: lets you
+ |                  log in as each role and SEE scoping immediately.
+ |                  RESTRICTION: real applicants arrive later via
+ |                  the external-DB connector, not by editing this.
+ |
+ |- public/         Static UI, no framework, no build step.
+ |  |- index.html + js/auth.js     2-step sign-in/sign-up. Keeps
+ |     token in localStorage; already-signed-in visitors bounce to
+ |     /dashboard.html. Shows the "role is fixed at sign-up" note.
+ |  |- dashboard.html + js/app.js  ONE shell for all roles.
+ |     ROLE_TABS defines per-role tab sets; RENDERERS maps tab->fn;
+ |     every view fetches scope-safe endpoints (the client never
+ |     filters - it cannot see out-of-scope rows at all).
+ |       CA   : My Applicants (directory + queue cards + APPLY /
+ |              SKIP-with-reason), My Activity
+ |       CAM  : Overview (team+counters+feed), Assignments [v3.1]
+ |              (quota banner used/cap/remaining + unassigned pool
+ |              with pending-link counts + per-applicant CA picker;
+ |              buttons disable at cap), CA Overview (dropdown
+ |              drill-down: their counters, applicants, applications,
+ |              activity), Applicants, Job Links (assignment matrix:
+ |              change-CA select + move-whole-applicant checkbox +
+ |              force-status select with mandatory reason), 
+ |              Applications (status filter), Activity
+ |       DEV  : System (counters, health cards incl. worker status +
+ |              connector health, worker start/stop), Data Sync
+ |              [v3.1] (Sync-from-Postgres button + result summary,
+ |              paste-one-applicant JSON ingest with CAM picker,
+ |              per-CAM quota inputs, worker enable/disable with live
+ |              active/max readout), Queue (re-queue/force-fail/
+ |              resolve buttons), Applicants, Applications,
+ |              Staff ([v3.2] CONFIRM-GATED CAM re-assignment - see
+ |              section 10), People (CAM dropdown -> tree overview ->
+ |              CA dropdown -> full drill-down), Events, Raw Tables
+ |              (incl. applicant_joblinks)
+ |     RESTRICTION: XSS-safe by construction - every dynamic value
+ |     passes esc(); links get rel="noopener".
+ |  |- css/style.css  Theme-only file (class names are the contract
+ |     with the JS). Current: Pop Poster palette - see section 0.
+ |     WHY centralize: whole-app restyle = one file edit, zero risk.
+ |
+ |- data/app.db         Created automatically on first boot (+ WAL
+ |                      files). Back up by copying; delete to reset.
+ |                      data/runs/<runId>/ [v3.1] holds per-run
+ |                      profile + isolated store + temp resume (the
+ |                      resume is deleted at run end; the rest is
+ |                      inspectable evidence).
+ |- package.json        type:module; scripts: start | seed | dev;
+ |                      engines node>=22.5 (node:sqlite); deps:
+ |                      express + dotenv; OPTIONAL deps: pg (lazy-
+ |                      imported only when Sync is actually clicked -
+ |                      server boots fine without it installed).
+ |- .env.example        [v3.1] documents every knob: PORT,
+ |                      WORKER_ENABLED, MAX_CONCURRENT_RUNS,
+ |                      WORKER_POLL_MS, ENGINE_PATH, PG_CONNECTION_
+ |                      STRING or PGHOST/PGPORT/PGUSER/PGPASSWORD/
+ |                      PGDATABASE/PGSSL, PG_APPLICANTS_TABLE/
+ |                      PG_APPLICANTS_QUERY/PG_LINKS_QUERY.
+ |                      Copy to .env to activate. .gitignore:
+ |                      node_modules, data/, .env.
+
+ Workspace root (base layer, UNTOUCHED by the platform):
+   ashby-hybrid-automation.js  - THE ENGINE: now an active worker
+   input [v3.1] - spawned as-is, one child process per run; its
+   normalizeApplicantPayload() is why the demographic doc needs no
+   translation. Still ZERO edits.
+   applicant-profile-store.js  - used INSIDE each child (slug +
+   per-applicant dir + saveJobStatus -> the jobs/*.json the worker
+   reads back as the run outcome).
+   genai-resume-filler.js, parse-resume.js, applicant-data/ (legacy
+   CLI output), ASHBY_APPLICATION_WORKFLOW.txt - reference inputs,
+   unchanged.
+
+====================================================================
+6. HOW WELL IS IT ADDING UP - VERIFICATION EVIDENCE
+====================================================================
+ All tested against the live server (HTTP round-trips):
+ - Role scoping: CA rakesh gets exactly his 5 apps; Priya's tree
+   = 9 apps / 2 CAs / 4 applicants and never sees Arjun's 3.
+   DEV sees all 12+. Illegal transition FAILED->FAILED rejected.
+ - APPLY (#4 ASSIGNED->QUEUED) ✔; skip without reason rejected ✔.
+ - Sign-up guards: CA without CAM select -> 400 ✔; role locked to
+   email at sign-up ✔ (documented in the UI note).
+ - CAM job-link ops: reassign Sana->Rakesh (single link) ✔;
+   force ASSIGNED->SUCCESS (illegal in machine, legal as override)
+   ✔ with finished_at stamped ✔; force WITHOUT reason -> 400 ✔;
+   reassign to another CAM's CA -> rejected "stays inside your
+   tree" ✔; both actions visible in Activity feed as
+   cam_reassigned_ca / cam_force_status events ✔; demo row restored
+   afterwards ✔.
+ - CA drill-down: /api/team/ca/:uuid returns Rakesh's full summary
+   to Priya ✔; out-of-tree uuid -> 403 ✔; DEV People tab cascades
+   CAM->CA via the same endpoints ✔.
+ - Auth: real user signups through the UI work (your account,
+   shashank.dev, etc.); codes appear in console; sessions survive
+   restarts (tokens live in SQLite, 12h TTL).
+ - [v3.1] EXTERNAL DB + ASSIGNMENT + APPLY, end-to-end over live
+   HTTP (10/10 checks): ingest of the real AWL-9999 demographic
+   doc -> applicant stored ca_id NULL / cam_id set, resume ADDRESS
+   only (S3 URL), profile normalised (name + knockout answers) ->
+   appears in CAM pool with 1 pending link -> CAM assigns to CA ->
+   exactly 1 ASSIGNED application materialised -> quota set to 1:
+   SECOND assignment rejected 400 "Applicant quota reached
+   (1/1)" -> CA APPLY -> QUEUED + worker.kick() fired -> with the
+   worker disabled the row correctly STAYS QUEUED (no browser) -
+   control path proven without burning a real run. Test rows and
+   links cleaned up afterwards.
+ - [v3.1] Boot evidence: migrate() ALTERs ran against the existing
+   demo db (6 columns added in place, seed data intact); worker
+   poll loop starts with the server.
+ - [v3.2] Staff tab CAM change: dropdown alone is inert; the
+   "Change CAM: old -> new" box + checkbox + Save gate the single
+   POST; Revert/same-pick cancel; failed save rolls the dropdown
+   back. (UI-level gate; the underlying DEV manager endpoint was
+   HTTP-tested earlier.)
+Known rough edges (updated): mailer is console-only; no
+ pagination on big tables; events list is capped (25-150);
+ Postgres sync is manual-click (no scheduler yet); screenshots /
+ resolution_log not surfaced in the UI yet; first REAL parallel
+ run should start with MAX_CONCURRENT_RUNS=1-2 to confirm the
+ engine tolerates concurrent headed launches on this host.
+
+====================================================================
+7. ARCHITECTURE DECISIONS RECAP (WHY IT IS THIS WAY)
+====================================================================
+ 1. node:sqlite over better-sqlite3: no native compile on Windows,
+    sync API simplifies all store code.
+ 2. Denormalized ca_id/manager_id per application: single-clause
+    scoping; reassign updates them explicitly (and optionally the
+    whole applicant).
+ 3. State machine + explicit override lane: normal flow stays
+    safe/legal; CAM/DEV overrides exist but are reason-required
+    and event-tagged, so audits can always tell machine-path vs
+    human-override.
+ 4. One store.js for logic, thin routes: the worker (v3.1) imports
+    these same functions (claim + transition + logEvent) -
+    no HTTP loopback, no duplicated rules.
+ 5. UI without framework/build: skeleton stage stays inspectable
+    and dependency-free; class-name contract keeps restyling free.
+ 6. Server-side filtering only: the browser can't request
+    out-of-scope rows even by hand-crafting URLs - scope is a
+    property of the token, not of the query.
+ 7. [v3.1] SPAWN, don't refactor: concurrency was asked for
+    without touching the proven engine -> one child process per
+    run with isolated APPLICANT_DATA_DIR. Free parallelism, zero
+    regression risk. (Full rationale: section 9.)
+ 8. [v3.1] Deferred materialisation: DB job links wait in
+    applicant_joblinks and only become applications when the CAM
+    assigns. Keeps "nothing exists before a CA decision" true,
+    lets quota govern real workload, and a link added to an
+    already-assigned applicant materialises immediately.
+ 9. [v3.2] Destructive re-assignment is confirm-gated in the UI:
+    silently saving dropdown edits risks accidental tree moves;
+    an explicit old -> new indicator + checkbox makes intent (and
+    the audit trail) unambiguous while the API stays simple.
+
+====================================================================
+8. REMAINING (FROM v2 PLAN) - STATUS AFTER v3.1
+====================================================================
+ P-A connector/applicant-db.js   BUILT (v3.1). Lazy-pg Azure
+     Postgres reader + manual JSON ingest; maps the
+     { client, additional_information } demographic doc into the
+     engine-native profile (personal/contact/education/skills/
+     experience/answers) + keeps only the resume ADDRESS.
+ P-B worker/runner.js            BUILT (v3.1). Parallel runner: one
+     child browser process per QUEUED application, bounded by
+     MAX_CONCURRENT_RUNS, atomic claim + run_id + attempts, maps
+     engine outcome -> SUCCESS/PENDING/FAILED, logs as 'worker'.
+ P-C worker/ashby-engine.js      NOT REQUIRED as a refactor: the
+     existing base-layer ashby-hybrid-automation.js is spawned
+     as-is (its CLI + folder persistence are exactly what the
+     isolated child process needs). No engine rewrite = no risk to
+     the proven 820-line form-filler.
+ P-D run artifacts               PARTIAL: per-run isolated
+     APPLICANT_DATA_DIR lives under data/runs/<run-id>/store; the
+     downloaded resume is deleted after the run (no-storage rule).
+     Screenshot surfacing in the UI is still open.
+ P-E polish backlog              OPEN: ADMIN role split, role-change
+     control, pagination, date-range filters, real mail sender, AM
+     surface. NEW open items in section 9.
+
+====================================================================
+9. v3.1 - EXTERNAL DB + CAM ASSIGNMENT + PARALLEL AUTOMATION
+====================================================================
+WHAT IT DOES
+ The single source of truth for WHO exists and WHAT to apply for is
+ now the Azure Postgres DB (viewable in pgAdmin): each applicant is
+ an AWL-ID row, and job links are (AWL-ID -> url) pairs. The AM no
+ longer assigns CAs - the CAM does, from a quota WE set per CAM.
+ Automation starts the instant a CA clicks APPLY and runs every
+ application in its OWN browser, concurrently, for any number of
+ CAs x applicants - no queue, no sequence.
+
+DATA FLOW (verified end-to-end, 10/10)
+ 1. connector/applicant-db.js pulls applicants (+ optional link
+    pairs) from Postgres via syncFromPostgres(), or ingestDocument()
+    loads one exported { client, additional_information } JSON. Both
+    call mapApplicantDoc() which normalises the demographic payload
+    into the exact profile shape the base engine already consumes and
+    stores ONLY the resume S3 address, never the file.
+ 2. Applicants land in the OWNING CAM's pool with ca_id = NULL
+    (cam_id from client.careerassociatemanagerid via staff.ext_id,
+    or a CAM picked in the DEV UI). Links wait in applicant_joblinks
+    with materialized = 0.
+ 3. CAM "Assignments" tab (GET /api/cam/pool) shows the pool + live
+    quota (assigned/quota). CAM picks a CA -> POST /api/cam/assign
+    -> assignApplicantToCa() enforces the quota, sets ca_id/cam_id,
+    and materializeJoblinks() turns each pending link into an
+    ASSIGNED application in that CA's queue.
+ 4. CA clicks APPLY -> application ASSIGNED -> QUEUED, and
+    worker.kick() runs immediately (no poll wait).
+
+PARALLELISM MODEL (the core of the request)
+ worker/runner.js keeps a poll loop (WORKER_POLL_MS) that is a
+ backstop; the real trigger is server.js calling worker.kick() on
+ every APPLY. tick() claims up to (MAX_CONCURRENT - active) QUEUED
+ rows and, for EACH, spawn()s an independent child:
+     node ashby-hybrid-automation.js <url> <resume> 
+       env APPLICANT_ID / PERSON_PROFILE_PATH / APPLICANT_DB_PATH /
+           APPLICANT_DATA_DIR=<own run dir>
+ N children = N browsers at once, each with its own applicant-data
+ folder, so there is NO shared state and NO ordering. claimForRun()
+ flips QUEUED -> APPLYING atomically (guarded UPDATE) so two slots
+ can never grab the same row. QUEUED rows past the cap simply wait
+ for the next free slot and are still picked up live. On child close
+ readLatestResult() scans the run's jobs/*.json and finishRun() maps
+ success->SUCCESS, failed->FAILED (banner reason), unknown/manual-
+ review/pending->PENDING, crash/no-result->FAILED; the downloaded
+ resume is then deleted.
+
+NEW SCHEMA (idempotent ALTERs in db/index.js migrate())
+ staff: applicant_quota (default 25, the per-CAM cap), ext_id
+ applicants: cam_id, ext_id, assigned_at (ca_id now set by CAM)
+ new table applicant_joblinks (awl_id,url,company,title,materialized)
+ applications: resolution_log_json
+
+NEW / CHANGED ROUTES (server.js)
+ GET  /api/cam/pool            pool + quota usage + the CAM's CAs
+ POST /api/cam/assign          attach applicant to a CA (quota-checked)
+ POST /api/dev/sync            pull applicants+links from Postgres
+ POST /api/dev/ingest          load one demographic JSON export
+ POST /api/dev/staff/:uuid/quota   set a CAM's applicant quota
+ POST /api/dev/worker            enable/disable the runner (was toggle)
+ APPLY route now also calls worker.kick()
+
+NEW UI (public/js/app.js)
+ CAM -> "Assignments" tab (quota banner + per-applicant CA picker)
+ DEV -> "Data Sync" tab (Sync from Postgres, Ingest JSON, per-CAM
+          quota inputs, worker enable/disable with live active count)
+
+CONFIG (.env.example in dashboards folder)
+ WORKER_ENABLED, MAX_CONCURRENT_RUNS, WORKER_POLL_MS, ENGINE_PATH,
+ PG_CONNECTION_STRING or PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE/
+ PGSSL, PG_APPLICANTS_TABLE / PG_APPLICANTS_QUERY / PG_LINKS_QUERY.
+ pg is an OPTIONAL dependency (imported lazily) so the server boots
+ with the DB unwired.
+
+STILL OPEN (v3.1 edges)
+ - Multiple simultaneous HEADED browsers need enough machine RAM /
+   CPU; raise MAX_CONCURRENT_RUNS to match the host, or run several
+   worker hosts later.
+ - Screenshot / resolution_log surfacing in the CA + CAM views.
+ - A scheduled/automatic Postgres poll (sync is manual-click today).
+ - Real knockout-question answer mapping is limited to the fields
+   present in the demographic doc; anything else falls to the
+   engine's existing GenAI field-filling, not the connector.
+
+====================================================================
+10. v3.2 - DEV STAFF TAB: CONFIRM-GATED CAM CHANGE
+====================================================================
+WHAT public/js/app.js renderDevStaff() only - no server change.
+HOW  Each CA row: dropdown + a "Current CAM: <name>" caption. On
+     dropdown change (different value only) an amber dashed
+     PENDING box appears: "Change CAM: <old> -> <new>" with a
+     checkbox, a Save button DISABLED until the box is ticked, and
+     Revert. Only the ticked Save POSTs /api/dev/staff/:uuid/
+     manager, then the tab re-renders so the new CAM becomes
+     "Current". Picking the original value or Revert hides the box;
+     a failed POST rolls back the dropdown and hides the box.
+WHY  The old flow saved on every dropdown change - one mis-click
+     silently re-parents a CA (changes who sees their whole tree).
+     The indicator makes the consequence visible BEFORE it happens.
+RESTRICTIONS gate is UI-only by design (the endpoint stays a
+     plain DEV route for scripting); applies to CA rows only;
+     moving a CA between CAMs does NOT retro-reassign existing
+     applications - use the CAM Job Links matrix for that.
+
+END OF CURRENT-STATE DOC (v3.2) - previous v2 plan superseded; base
+layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.
