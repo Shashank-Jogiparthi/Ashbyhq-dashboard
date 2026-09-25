@@ -3,8 +3,13 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node ashby-hybrid-automation.js",
-    "dev": "node ashby-hybrid-automation.js"
+    "start": "node ashbyhq-dashboard/server.js",
+    "dev": "node --watch ashbyhq-dashboard/server.js",
+    "engine": "node ashby-hybrid-automation.js",
+    "postinstall": "npm install --prefix ashbyhq-dashboard"
+  },
+  "engines": {
+    "node": ">=22.5"
   },
   "dependencies": {
     "@google/genai": "^1.16.0",

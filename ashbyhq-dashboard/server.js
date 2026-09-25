@@ -78,6 +78,12 @@ dotenv.config({ path: path.join(ROOT_DIR, '.env') });
 dotenv.config({ path: path.resolve(ROOT_DIR, '..', '.env') });
 
 const PORT = Number(process.env.PORT || 3100);
+// Local use stays loopback-only (nothing on the network can reach the dashboard,
+// which is deliberate - it holds applicant data). A deployed container has to
+// answer its platform's proxy, which connects from OUTSIDE the container, so
+// binding 127.0.0.1 there means "crashes / health check fails". Railway sets
+// RAILWAY_ENVIRONMENT on every service; BIND_HOST overrides either way.
+const BIND_HOST = process.env.BIND_HOST || (process.env.RAILWAY_ENVIRONMENT ? '0.0.0.0' : '127.0.0.1');
 const VALID_ROLES = ['ca', 'ops', 'dev', 'admin'];
 
 // OPS-tree endpoints a DEV/ADMIN may view for any manager by uuid.
@@ -746,7 +752,7 @@ app.delete('/api/admin/staff/:uuid', requireAuth, requireRole('admin'), wrap(asy
 app.get('/', (req, res) => res.redirect('/index.html'));
 app.get('/dashboard', (req, res) => res.redirect('/dashboard.html'));
 
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`\nASHBYHQ dashboard running (local, no external access):`);
-  console.log(`  http://localhost:${PORT}\n`);
+app.listen(PORT, BIND_HOST, () => {
+  console.log(`\nASHBYHQ dashboard listening on http://localhost:${PORT} (bound to ${BIND_HOST}`
+    + `${BIND_HOST === '127.0.0.1' ? ', local only)' : ' - reachable from the network)'}`);
 });
