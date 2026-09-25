@@ -44,12 +44,14 @@ import {
   devResolvePending,
   readTable,
   getSystemState,
-  setSystemState
+  setSystemState,
+  upsertExternalApplicant
 } from './db/store.js';
 import { sendAuthCode } from './core/mailer.js';
+import { parseAwlLinkTable } from './core/joblink-csv.js';
 import * as worker from './worker/runner.js';
 import { enqueueLinkScans, scanQueueState, scanStateForUrl, start as startScanWorker } from './worker/link-scanner.js';
-import { syncFromPostgres, syncApplicantByAwl, ingestDocument, isConfigured as connectorConfigured } from './connector/applicant-db.js';
+import { syncFromPostgres, syncApplicantByAwl, ingestDocument, normalizeAwlId, isConfigured as connectorConfigured } from './connector/applicant-db.js';
 import { runDraftPass, buildReviewQuestions } from './draft-service.js';
 import {
   listFieldAnswers,
@@ -168,14 +170,23 @@ function handleError(res, error) {
 /* ----------------------------- auth ------------------------------- */
 
 // Step 1: sign-up / sign-in request -> issues the one-time code.
-// Existing email = sign-in (role from record). New email = sign-up with chosen role.
+// The portal sends an explicit `mode`: SIGN IN never creates an account and
+// SIGN UP never logs into an existing one. Defaulting to 'signup' keeps older
+// callers (and the CLI helpers) working unchanged.
+// NOTE: role is still self-selected on sign-up and both branches answer with
+// { isNewAccount, role }, so this endpoint is an enumeration oracle. Real SMTP
+// must not go live until registration is gated (invite-only / admin-approved).
 app.post('/api/auth/request-code', wrap(async (req) => {
   const email = await normalizeEmail(req.body.email);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, 'Enter a valid email address');
+  const mode = String(req.body.mode || 'signup').toLowerCase() === 'signin' ? 'signin' : 'signup';
 
   let user = await findStaffByEmail(email);
   let isNewAccount = false;
   if (!user) {
+    if (mode === 'signin') {
+      throw new HttpError(404, 'No account found for that email. Switch to "Sign up" to create one.');
+    }
     const role = String(req.body.role || '').toLowerCase();
     if (!VALID_ROLES.includes(role)) throw new HttpError(400, 'Choose a role: CA, OPS, DEV or ADMIN');
     // ADMIN cannot be self-served: only the FIRST admin account can be
@@ -192,8 +203,12 @@ app.post('/api/auth/request-code', wrap(async (req) => {
     } else {
       managerId = null;
     }
+    // No name field on the form any more: createStaff derives the display name
+    // from the email address, and still honours `name` for API/ingest callers.
     user = await createStaff({ email, name: req.body.name, role, managerId });
     isNewAccount = true;
+  } else if (mode === 'signup') {
+    throw new HttpError(409, 'An account already exists for that email. Switch to "Sign in".');
   } else if (user.role === 'ca' && !user.manager_id && req.body.managerId) {
     await updateStaffManager(user.uuid, req.body.managerId);
     user = await getStaff(user.uuid);
@@ -203,7 +218,7 @@ app.post('/api/auth/request-code', wrap(async (req) => {
   await sendAuthCode(user.email, code);
   await touchSignIn(user.uuid);
   await logLogin(user, isNewAccount ? 'signup' : 'signin');
-  return { sent: true, isNewAccount, email: user.email, role: user.role };
+  return { sent: true, isNewAccount, email: user.email, name: user.name, role: user.role };
 }));
 
 async function logLogin(user, kind) {
@@ -575,39 +590,49 @@ function autoScanOn() {
 /* ---------------- job links: ingest + shared question cache -------- */
 // The assignment of links to applicants lives in the CRM table
 // public.ashby_joblinks (awl_id -> job_links[]); a normal sync reads it. This
-// route is the write side: whatever DEV/ADMIN pastes here is appended to that
-// same table (so it survives a re-sync and stays visible to the user), mirrored
-// into the pending applicant_joblinks rows, and the link itself is registered in
-// public.ashby_joblink_questions, which holds its pre-scanned questions.
+// route is the write side: whatever DEV uploads as a .csv or pastes as text is
+// appended to that same table (so it survives a re-sync and stays visible to the
+// user), mirrored into the pending applicant_joblinks rows, and the link itself
+// is registered in public.ashby_joblink_questions, which holds its pre-scanned
+// questions. From there the pre-scan worker takes over on its own.
 function parseLinkPairs(body = {}) {
   const out = [];
   for (const p of (Array.isArray(body.pairs) ? body.pairs : [])) {
     out.push({
-      awlId: String(p.awlId || p.awl_id || p.awl || '').trim(),
-      url: String(p.url || p.job_link || p.link || '').trim()
+      awlId: normalizeAwlId(p.awlId || p.awl_id || p.awl),
+      url: String(p.url || p.job_link || p.link || '').trim(),
+      company: String(p.company || '').trim(),
+      title: String(p.title || '').trim()
     });
   }
-  // Free-form paste: one pair per line, any separator, AWL id + http(s) URL in
-  // either order. Lines starting with # are comments.
-  for (const line of String(body.text || '').split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t.startsWith('#')) continue;
-    const awl = t.match(/AWL-?\d+/i);
-    const url = t.match(/https?:\/\/\S+/i);
-    if (awl && url) out.push({ awlId: awl[0].toUpperCase(), url: url[0] });
-  }
-  const single = String(body.awlId || '').trim();
-  const singleUrl = String(body.url || '').trim();
-  if (single && singleUrl) out.push({ awlId: single.toUpperCase(), url: singleUrl });
-  return out.filter((p) => p.awlId && p.url);
+  // ONE parser for both a pasted block and an uploaded .csv (core/joblink-csv.js):
+  // header row matched by name, quoted cells honoured, TSV/;/| delimiters detected,
+  // and a header-less line still resolves because the AWL-ID + URL are matched by
+  // shape instead of trusting a column order. `malformed` is what the DEV sees as
+  // "these rows were not pairs" rather than the ingest quietly dropping them.
+  const table = parseAwlLinkTable(body.text || '');
+  out.push(...table.pairs);
+  const single = {
+    awlId: normalizeAwlId(body.awlId),
+    url: String(body.url || '').trim(),
+    company: String(body.company || '').trim(),
+    title: String(body.title || '').trim()
+  };
+  if (single.awlId && single.url) out.push(single);
+  return { pairs: out.filter((p) => p.awlId && p.url), malformed: table.skipped };
 }
 
 app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => {
-  const pairs = parseLinkPairs(req.body || {});
-  if (!pairs.length) throw new HttpError(400, 'No (AWL-ID, job link) pairs found. Paste lines like: AWL-12  https://jobs.ashbyhq.com/…');
+  const { pairs, malformed } = parseLinkPairs(req.body || {});
+  if (!pairs.length) {
+    throw new HttpError(400, malformed.length
+      ? `Nothing usable in that input: ${malformed.length} row(s) had no AWL-ID + job link pair (first: line ${malformed[0].line} — ${malformed[0].reason}).`
+      : 'No (AWL-ID, job link) pairs found. Upload a .csv with an AWL-ID and a job link column, or paste lines like: AWL-12  https://jobs.ashbyhq.com/…');
+  }
   const seen = new Set();
   const accepted = [];
   const rejected = [];
+  const placeholders = [];
   const needScan = new Set();
   // 0. The paste contract is (AWL-ID, job link) and nothing else. So the first
   //    thing that happens is a CRM read: every column of client_profiles +
@@ -629,7 +654,7 @@ app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async 
       }
     }
   }
-  for (const { awlId, url } of pairs) {
+  for (const { awlId, url, company, title } of pairs) {
     const dedupe = `${awlId}|${normalizeJobLink(url)}`;
     if (seen.has(dedupe)) continue;
     seen.add(dedupe);
@@ -639,11 +664,22 @@ app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async 
       await syncApplicantByAwl(awlId).catch(() => {});
       applicant = await getApplicantByAwlId(awlId);
     }
-    if (!applicant) { rejected.push({ awlId, url, error: 'AWL-ID not found in the applicant DB' }); continue; }
+    if (!applicant) {
+      // Operator rule for table ingest: a row the CRM does not know yet is still
+      // an assignment, so create the shell applicant rather than dropping the
+      // link. The assignment + pre-scan happen now; the real details arrive on
+      // the next sync (or the run's own re-fetch by AWL-ID), and until then the
+      // draft pass simply has nothing to answer from and asks the CA.
+      applicant = (await upsertExternalApplicant({
+        awlId, fullName: awlId, email: '', phone: '', resumeAddress: '', profileJson: '{}', extId: null, opsId: null
+      })).applicant;
+      placeholders.push(awlId);
+      await logEvent(null, 'applicant_placeholder_created', 'dev', { awl_id: awlId, source: 'link_ingest' });
+    }
     // 1. remember the assignment in the CRM map (awl_id -> job_links[])
     const stored = await appendJobLink(awlId, url);
     // 2. queue it locally as a pending link
-    await upsertApplicantJoblink(awlId, { url, company: '', title: '' });
+    await upsertApplicantJoblink(awlId, { url, company: company || '', title: title || '' });
     // 3. register the link itself so its questions can be scanned once for all
     const reg = await upsertJobLinkQuestions({ url });
     if (!reg.count) needScan.add(reg.link || normalizeJobLink(url));
@@ -660,7 +696,14 @@ app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async 
   const scan = needScan.size ? await enqueueLinkScans([...needScan], { reason: 'links_ingested' })
     : { enabled: true, queued: [], skipped: [] };
   const failed = accepted.filter((a) => a.error);
-  return { accepted: accepted.filter((a) => !a.error), rejected: [...rejected, ...failed], links: accepted.map((a) => a.url), profiles, scan };
+  return {
+    accepted: accepted.filter((a) => !a.error), rejected: [...rejected, ...failed],
+    links: accepted.map((a) => a.url), profiles, scan,
+    // Rows the parser could not read as a pair, plus the AWL-IDs it had to
+    // create a shell for - both need to be visible, never silently dropped.
+    placeholders: [...new Set(placeholders)],
+    malformed: malformed.slice(0, 50), malformed_count: malformed.length
+  };
 }));
 
 // Explicit pre-scan control: queue specific links (by url or job_links.id), or

@@ -71,6 +71,16 @@ export function normalizeEmail(email) {
   return String(email || '').toLowerCase().trim();
 }
 
+// The sign-up form no longer asks for a name, so the staff directory shows a
+// display name derived from the address: tags and the +suffix are dropped and
+// the remaining separators become capitalised words.
+export function displayNameFromEmail(email) {
+  const local = normalizeEmail(email).split('@')[0].split('+')[0];
+  const words = local.replace(/[._\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!words) return normalizeEmail(email);
+  return words.split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
 export async function findStaffByEmail(email) {
   return db.prepare('SELECT * FROM staff WHERE email = ?').get(normalizeEmail(email));
 }
@@ -135,11 +145,12 @@ export async function staffImpact(staffUuid) {
 
 export async function createStaff({ email, name, role, managerId = null }) {
   if (!['ca', 'ops', 'dev', 'admin'].includes(role)) throw new HttpError(400, 'Unknown role');
-  if (!name || !String(name).trim()) throw new HttpError(400, 'Name is required');
+  const finalName = (name && String(name).trim()) || displayNameFromEmail(email);
+  if (!finalName) throw new HttpError(400, 'Name is required');
   const record = {
     uuid: uuid(),
     email: normalizeEmail(email),
-    name: String(name).trim(),
+    name: finalName,
     role,
     manager_id: managerId,
     active: 1,

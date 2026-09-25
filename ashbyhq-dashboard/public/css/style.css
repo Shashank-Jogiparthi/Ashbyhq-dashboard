@@ -79,6 +79,27 @@ button.green:hover { background: #43c493; }
 button.danger { background: var(--coral); }
 button.danger:hover { background: #ff6f5c; }
 
+/* A <label> that has to look like a button: an <input type="file"> cannot wrap a
+   <button>, so the .csv upload control is styled through the same recipe. */
+.btn {
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 7px 16px;
+  box-shadow: var(--pop);
+  display: inline-block;
+  transition: transform 0.08s, box-shadow 0.08s, background 0.12s;
+}
+.btn:hover { transform: translate(-1.5px, -1.5px); box-shadow: 5px 5px 0 var(--ink); }
+.btn.green { background: var(--mint); }
+.btn.primary { background: var(--tang); }
+input[type="file"] { font: inherit; max-width: 100%; }
+input[type="file"]::file-selector-button { font: inherit; font-weight: 800; }
+
 /* ------------------------------- inputs ---------------------------- */
 
 input, select {
@@ -286,6 +307,45 @@ a:hover { color: #d97a18; }
   margin-bottom: 5px;
 }
 .auth-card .sub { color: var(--muted); }
+
+/* Sign in / sign up: a segmented control above a framed panel. The frame is the
+   "iframe" the modes swap inside — own border, own shadow, own surface — so the
+   card never changes size when Sign up reveals the role fields. */
+.auth-switch {
+  display: flex;
+  gap: 0;
+  border: 2px solid var(--ink);
+  border-radius: 12px;
+  background: var(--surface-2);
+  box-shadow: var(--pop);
+  overflow: hidden;
+}
+.auth-switch .tab {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--ink-soft);
+  padding: 9px 6px;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+.auth-switch .tab:hover { transform: none; box-shadow: none; background: #fff; color: var(--ink); }
+.auth-switch .tab.active {
+  background: var(--butter);
+  color: var(--ink);
+  box-shadow: inset 0 -3px 0 var(--tang);
+}
+.auth-frame {
+  margin-top: 16px;
+  border: 2px solid var(--ink);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--pop-md);
+  padding: 16px 16px 18px;
+}
+.auth-frame .field:first-of-type { margin-top: 12px; }
 
 .error-box {
   background: var(--coral-soft);

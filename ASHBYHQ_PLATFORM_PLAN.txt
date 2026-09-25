@@ -88,13 +88,19 @@ deep-dive on the external-DB + parallel-automation design.
 ====================================================================
 2. AUTH FLOW (WHAT / HOW / WHY)
 ====================================================================
- Step 1  POST /api/auth/request-code {email, name?, role?, managerId?}
-   - Existing email  -> SIGN-IN. Role comes from the staff record.
-     The dropdown is IGNORED (the sign-in screen now says so:
-     "Existing <ROLE> account - the role is fixed at sign-up").
-   - New email       -> SIGN-UP with the chosen role.
+ Step 1  POST /api/auth/request-code {email, mode, role?, managerId?, name?}
+   - mode is sent by the portal's two tabs (Sign in / Sign up) and
+     defaults to 'signup' for older callers. The tabs are separate
+     panels inside one framed card; there is NO name field - the
+     display name is derived from the email local part by
+     db/store.js displayNameFromEmail().
+   - mode=signin + unknown email -> 404 ("switch to Sign up").
+     mode=signup + known email -> 409 ("switch to Sign in").
+     A sign-in therefore can never create an account and a sign-up
+     can never log into one; role always comes from the record.
+   - New email (signup) -> SIGN-UP with the chosen role.
      CA requires selecting an existing CAM (400 otherwise).
-     CAM/DEV need no manager.
+     CAM/DEV need no manager. ADMIN only bootstraps the first one.
    - Issues 6-digit code (5-min TTL, max 5 wrong attempts,
      single active code per email via upsert), prints it through
      core/mailer.js stub.

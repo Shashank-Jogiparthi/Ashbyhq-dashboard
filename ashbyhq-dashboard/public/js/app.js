@@ -887,14 +887,28 @@ async function renderDevDataSync() {
 
     <div class="card" style="margin-bottom:14px;">
       <b>Job links (AWL-ID → link)</b>
-      <p class="muted">One pair per line — <span class="mono">AWL-123&nbsp;&nbsp;https://jobs.ashbyhq.com/…</span>
-        (any spacing/order; # lines ignored). Each link is registered once in
-        <span class="mono">ashby_joblink_questions</span> and its pre-scanned questions are reused for
-        every applicant it is assigned to. A link that has no questions cached yet is
-        <b>pre-scanned automatically</b> in the background the moment it is assigned.</p>
-      <textarea id="links-paste" rows="5" style="width:100%;font-family:monospace;font-size:12px;"
-        placeholder="AWL-101  https://jobs.ashbyhq.com/acme/4e64ab86-4e30-403b-b1b9-41dc052570ce&#10;AWL-102  https://jobs.ashbyhq.com/acme/4e64ab86-4e30-403b-b1b9-41dc052570ce"></textarea>
-      <div class="actions"><button class="green" id="btn-add-links">⤑ Add job links</button></div>
+      <p class="muted">Upload a <span class="mono">.csv</span> export — one row per assignment, with an
+        AWL-ID column and a job-link column. Column names are matched loosely
+        (<span class="mono">applywizz_id / awl_id / awl / id</span> and
+        <span class="mono">job_link / url / link / apply_url</span>), quoted cells, <span class="mono">.tsv</span>
+        and <span class="mono">;</span>/<span class="mono">|</span> delimiters are handled, and
+        <span class="mono">company / title</span> are used when present. Every row is appended to
+        <span class="mono">ashby_joblinks</span> in the CRM, the link is registered once in
+        <span class="mono">ashby_joblink_questions</span>, and a link with no cached questions yet is
+        <b>pre-scanned automatically</b> in the background — big files go in batches so the request never times out.</p>
+      <div class="actions" style="align-items:center;flex-wrap:wrap;gap:10px;">
+        <label class="btn green">⤒ Choose .csv
+          <input type="file" id="links-csv" accept=".csv,.tsv,.txt,text/csv,text/plain" hidden />
+        </label>
+        <span class="muted small" id="csv-name">no file chosen</span>
+        <button class="primary" id="btn-csv-ingest" disabled>⤑ Ingest file</button>
+      </div>
+      <details style="margin-top:10px;">
+        <summary class="muted small">…or paste lines (one pair per line, any spacing, # ignored)</summary>
+        <textarea id="links-paste" rows="4" style="width:100%;font-family:monospace;font-size:12px;margin-top:8px;"
+          placeholder="AWL-101  https://jobs.ashbyhq.com/acme/4e64ab86-4e30-403b-b1b9-41dc052570ce&#10;AWL-102  https://jobs.ashbyhq.com/acme/4e64ab86-4e30-403b-b1b9-41dc052570ce"></textarea>
+        <div class="actions"><button class="green" id="btn-add-links">⤑ Add job links</button></div>
+      </details>
       <div id="links-out" class="muted" style="margin-top:8px;"></div>
       <p class="muted" style="margin-top:10px;">ashby_joblinks (AWL-ID → links):
         ${tableHtml(['AWL-ID', 'job_links'], (cache.assignments || []).map((r) => [
@@ -962,25 +976,116 @@ async function renderDevDataSync() {
     } catch (err) { $('sync-out').textContent = ''; toast(err.message, true); }
   });
 
+/* Job-link ingest. A pasted block and an uploaded .csv take the SAME path: the
+   text is cut into batches and each batch is POSTed to /api/dev/links, where the
+   real parsing happens (core/joblink-csv.js). Batching exists because the server
+   reads the CRM for every distinct AWL-ID in a request - a 500-row file in one
+   call would sit behind a proxy timeout and look like a failure. */
+const LINK_BATCH_ROWS = 25;
+
+function chunkLinkText(text) {
+  const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/);
+  const firstIdx = lines.findIndex((l) => l.trim() && !l.trim().startsWith('#'));
+  if (firstIdx === -1) return [];
+  const first = lines[firstIdx];
+  // A header is the first line that delimits cells and carries no URL. The server
+  // decides the actual column mapping; this only controls what we re-attach to
+  // each batch so batch 2+ still knows which column is which.
+  const isHeader = /[,;\t|]/.test(first) && !/https?:\/\//i.test(first);
+  const header = isHeader ? first : null;
+  const data = isHeader ? lines.slice(firstIdx + 1) : lines;
+
+  const chunks = [];
+  let cur = [];
+  let quotes = 0;
+  let rows = 0;
+  for (const line of data) {
+    quotes += (line.match(/"/g) || []).length;
+    cur.push(line);
+    if (line.trim()) rows += 1;
+    // Never cut inside a quoted cell (a note column may hold real newlines):
+    // only close a chunk while the quote count is balanced.
+    if (quotes % 2 === 0 && rows >= LINK_BATCH_ROWS) { chunks.push(cur.join('\n')); cur = []; rows = 0; }
+  }
+  if (cur.some((l) => l.trim())) chunks.push(cur.join('\n'));
+  return chunks
+    .map((c) => (header && !c.trimStart().startsWith(header.trim()) ? `${header}\n${c}` : c))
+    .filter((c) => c.trim());
+}
+
+async function ingestLinkText(text, status) {
+  const chunks = chunkLinkText(text);
+  if (!chunks.length) return 'Nothing to send — every line was empty.';
+  const total = { accepted: 0, rejected: [], malformed: [], malformedCount: 0, placeholders: [], scanned: 0 };
+  for (let i = 0; i < chunks.length; i++) {
+    // Re-resolved every round: the refresh at the end of an ingest rebuilds the
+    // pane, and a progress line written into a detached node is never seen.
+    const el = $('links-out') || status;
+    el.textContent = `Ingesting batch ${i + 1} of ${chunks.length}…`;
+    const res = await api('/api/dev/links', { method: 'POST', body: JSON.stringify({ text: chunks[i] }) });
+    total.accepted += (res.accepted || []).length;
+    total.rejected.push(...(res.rejected || []));
+    total.malformed.push(...(res.malformed || []));
+    total.malformedCount += Number(res.malformed_count || 0);
+    total.placeholders.push(...(res.placeholders || []));
+    total.scanned += (res.scan?.queued || []).length;
+  }
+  const bits = [`<b>added ${total.accepted} assignment(s) to ashby_joblinks</b>`];
+  if (total.scanned) bits.push(`pre-scan queued for ${total.scanned} link(s) — the CA review pane fills itself in when the questions land`);
+  else bits.push('every link already had a cached question inventory');
+  const uniqPh = [...new Set(total.placeholders)];
+  if (uniqPh.length) {
+    bits.push(`<br><b>${uniqPh.length} AWL-ID(s) had no CRM record, so a placeholder applicant was created</b> `
+      + `<span class="mono small">${esc(uniqPh.slice(0, 8).join(', '))}${uniqPh.length > 8 ? '…' : ''}</span> `
+      + `— they will pick up their real details on the next sync, and until then the review pane asks the CA everything.`);
+  }
+  if (total.rejected.length) {
+    bits.push(`<br>rejected ${total.rejected.length}: ${esc(total.rejected.slice(0, 5).map((r) => `${r.awlId} — ${r.error}`).join('; '))}`);
+  }
+  if (total.malformed.length) {
+    bits.push(`<br>skipped ${total.malformedCount} row(s) that were not an AWL-ID + link pair: `
+      + `<span class="mono small">${esc(total.malformed.slice(0, 5).map((m) => `line ${m.line} (${m.reason})`).join(', '))}</span>`);
+  }
+  return bits.join('<br>');
+}
+
   $('btn-add-links').addEventListener('click', async () => {
     const text = $('links-paste').value.trim();
     if (!text) return toast('Paste at least one "AWL-ID  <job link>" line.', true);
     $('btn-add-links').disabled = true;
-    $('links-out').textContent = 'Saving…';
     try {
-      const res = await api('/api/dev/links', { method: 'POST', body: JSON.stringify({ text }) });
-      const bits = [];
-      if (res.accepted?.length) bits.push(`queued ${res.accepted.length} pair(s)`);
-      if (res.rejected?.length) bits.push(`rejected ${res.rejected.length}: ${res.rejected.map((r) => `${r.awlId} — ${r.error}`).join('; ')}`);
-      $('links-out').innerHTML = `<b>${esc(bits.join(' · '))}</b>`
-        + (res.scan?.queued?.length
-          ? `<br>Pre-scan started in the background for ${res.scan.queued.length} link(s) — the CA review pane unlocks itself when the questions land.`
-          : '<br>All links already have a cached question inventory.');
-      $('links-paste').value = '';
+      const summary = await ingestLinkText(text, $('links-out'));
+      // Refresh FIRST, then write: renderDevDataSync() replaces the whole pane,
+      // so a summary put up before it would be wiped along with the paste box.
+      await renderDevDataSync();
+      $('links-out').innerHTML = summary;
       toast('Job links saved.');
-      renderDevDataSync();          // refresh both tables underneath
-    } catch (err) { $('links-out').textContent = ''; toast(err.message, true); }
-    $('btn-add-links').disabled = false;
+    } catch (err) { const el = $('links-out'); if (el) el.textContent = ''; toast(err.message, true); }
+    const btn = $('btn-add-links');
+    if (btn) btn.disabled = false;
+  });
+
+  // Choosing a file only names it; writing to the CRM needs the second click, so
+  // a misclick on the wrong export cannot push assignments anywhere.
+  $('links-csv').addEventListener('change', () => {
+    const file = $('links-csv').files?.[0];
+    $('csv-name').textContent = file ? `${file.name} · ${(file.size / 1024).toFixed(1)} KB` : 'no file chosen';
+    $('btn-csv-ingest').disabled = !file;
+    $('links-out').textContent = '';
+  });
+
+  $('btn-csv-ingest').addEventListener('click', async () => {
+    const file = $('links-csv').files?.[0];
+    if (!file) return toast('Choose a .csv first.', true);
+    $('btn-csv-ingest').disabled = true;
+    try {
+      const summary = await ingestLinkText(await file.text(), $('links-out'));
+      await renderDevDataSync();          // re-render before the summary survives
+      $('links-out').innerHTML = summary;
+      toast(`${file.name} ingested.`);
+    } catch (err) { const el = $('links-out'); if (el) el.textContent = ''; toast(err.message, true); }
+    const btn = $('btn-csv-ingest');
+    if (btn) btn.disabled = false;
   });
 
   $('btn-ingest').addEventListener('click', async () => {

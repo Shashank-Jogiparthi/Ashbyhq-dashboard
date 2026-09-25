@@ -295,8 +295,50 @@ async function verifyDevLog(appA) {
   check('the feed carries the AWL-ID + link context', ctx.some((e) => e.awl_id === AWL && e.company === 'Verify Co'));
 }
 
+/* --------------------- .csv / paste ingestion parser -----------------
+   Pure parser assertions (no writes): the DEV tab hands a whole uploaded file
+   to the same function a pasted block goes through, so these shapes are the
+   ingest contract. A row that is guessed wrong applies a real person to the
+   wrong job, hence the "must be skipped, not inferred" checks. */
+async function verifyCsvParser() {
+  step('5. Job-link table parser (.csv upload + paste)');
+  const { parseAwlLinkTable } = await import('../core/joblink-csv.js');
+  const U1 = 'https://jobs.ashbyhq.com/acme/3f2b1c9a-0000-4000-8000-000000000001';
+  const U2 = 'https://jobs.ashbyhq.com/acme/3f2b1c9a-0000-4000-8000-000000000002';
+
+  const headed = parseAwlLinkTable(
+    `applywizz_id,job_link,company,title\nAWL-101,${U1},Acme,Staff Engineer\n102,${U2}?src=Linkedin,Acme,"Data, Infra"\n`);
+  check('a header row is consumed, not ingested', headed.pairs.length === 2 && headed.header, `${headed.pairs.length} pair(s)`);
+  check('a bare numeric id is keyed exactly as the CRM keys it', headed.pairs[1]?.awlId === '102', headed.pairs[1]?.awlId);
+  check('tracking params collapse to one link', headed.pairs[1]?.url === U2, headed.pairs[1]?.url);
+  check('company + title columns are carried', headed.pairs[1]?.title === 'Data, Infra', headed.pairs[1]?.title);
+
+  const priority = parseAwlLinkTable(`id,applywizz_id,url\n999,AWL-201,${U1}\n`);
+  check('the specific id column beats a generic "id"', priority.pairs[0]?.awlId === 'AWL-201', priority.pairs[0]?.awlId);
+
+  const quoted = parseAwlLinkTable(`awl,job link\nAWL-202,"${U1}"\nAWL-203,"${U2}","note with ""quotes"""\n`);
+  check('quoted cells (and "" escapes) parse', quoted.pairs.length === 2 && quoted.pairs[0].url === U1, `${quoted.pairs.length} pair(s)`);
+
+  const tsv = parseAwlLinkTable(`awl_id\tjob_link\nAWL-204\t${U1}\n`);
+  check('a TSV export parses', tsv.pairs[0]?.awlId === 'AWL-204' && tsv.pairs[0]?.url === U1, `${tsv.pairs.length} pair(s)`);
+
+  const commented = parseAwlLinkTable(`# exported from the CRM\nawl_id,job_link\nAWL-205,${U1}\n`);
+  check('a leading comment does not hide the header', commented.header && commented.pairs.length === 1 && !commented.skipped.length,
+    `${commented.pairs.length} pair(s), ${commented.skipped.length} skipped`);
+
+  const pasted = parseAwlLinkTable(
+    `# pasted from the CRM\nAWL-101   ${U1}\nawl102 | ${U2}\n\nAWL-101   ${U1}?source=linkedin\n`);
+  check('header-less pasted lines match by shape', pasted.pairs.length === 2, `${pasted.pairs.length} pair(s)`);
+  check('comments are ignored and repeats deduped', !pasted.skipped.length && pasted.pairs.every((p) => p.awlId !== 'IGNORED'));
+
+  const bad = parseAwlLinkTable(`awl_id,job_link\nAWL-301,not-a-url\nsee notes,${U1}\n,,\n`);
+  check('a row without a real link is skipped', bad.skipped.some((s) => s.reason === 'no http(s) job link'), JSON.stringify(bad.skipped));
+  check('prose in the id column is skipped, not guessed', bad.skipped.some((s) => /not an id/.test(s.reason)), JSON.stringify(bad.skipped));
+  check('an empty row is dropped silently', bad.pairs.length === 0 && !bad.skipped.some((s) => s.line === 4));
+}
+
 async function verifyCrmFetch() {
-  step('5. CRM fetch (--crm only; needs the Azure connection)');
+  step('6. CRM fetch (--crm only; needs the Azure connection)');
   const { isConfigured, syncApplicantByAwl } = await import('../connector/applicant-db.js');
   if (!isConfigured()) { console.log('  SKIP  PG_* not configured'); return; }
   const summary = await syncApplicantByAwl(AWL);
@@ -313,6 +355,7 @@ try {
   const { appA } = await verifyApplicantAndPurge();
   await verifyLocationShapes();
   await verifyDevLog(appA);
+  await verifyCsvParser();
   if (process.argv.includes('--crm')) await verifyCrmFetch();
 } catch (err) {
   failed += 1;

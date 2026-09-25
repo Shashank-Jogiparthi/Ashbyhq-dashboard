@@ -10,37 +10,42 @@
   <div class="auth-wrap">
     <div class="card auth-card">
       <div class="muted" style="letter-spacing:2px;font-weight:800;">APPLYWIZZ / ASHBYHQ</div>
-      <h1>Sign in or Sign up</h1>
-      <p class="muted">Enter your work email and the role you work as. A one-time code is sent to your email (Microsoft authenticator flow) — in this local build the code is printed on the server console.</p>
+      <h1>Staff portal</h1>
+      <p class="muted">Choose how you are entering. A one-time code is sent to your work email
+        (Microsoft authenticator flow) &mdash; in this build the code is printed on the server console.</p>
 
-      <!-- STEP 1: identity -->
+      <!-- STEP 1: identity. Two explicit modes instead of one form that guesses:
+           "Sign in" never creates an account, "Sign up" is the only path that can. -->
       <div id="step-identity">
-        <div class="field">
-          <label for="email">Email</label>
-          <input id="email" type="email" placeholder="you@applywizz.local" autocomplete="username" />
+        <div class="auth-switch" role="tablist">
+          <button type="button" class="tab active" id="tab-in" role="tab">Sign in</button>
+          <button type="button" class="tab" id="tab-up" role="tab">Sign up</button>
         </div>
-        <div id="signup-fields">
+        <div class="auth-frame">
+          <p class="muted" id="mode-hint" style="margin:0 0 10px;">Already a member &mdash; email only.</p>
           <div class="field">
-            <label for="name">Full name</label>
-            <input id="name" type="text" placeholder="Only needed for new accounts" />
+            <label for="email">Work email</label>
+            <input id="email" type="email" placeholder="you@applywizz.local" autocomplete="username" />
           </div>
-          <div class="field">
-            <label for="role">Sign in as</label>
-            <select id="role">
-              <option value="ca">CA — Career Associate</option>
-              <option value="ops">OPS — Operational Manager</option>
-              <option value="dev">DEV — Developer</option>
-              <option value="admin">ADMIN — Organization Admin</option>
-            </select>
-            <p class="muted" style="margin:6px 0 0;font-size:12px;">ADMIN: only the first ADMIN can be created here; further admins are promoted by an existing ADMIN from the Staff tab.</p>
+          <div id="signup-fields" class="hidden">
+            <div class="field">
+              <label for="role">I work as</label>
+              <select id="role">
+                <option value="ca">CA — Career Associate</option>
+                <option value="ops">OPS — Operational Manager</option>
+                <option value="dev">DEV — Developer</option>
+                <option value="admin">ADMIN — Organization Admin</option>
+              </select>
+              <p class="muted" style="margin:6px 0 0;font-size:12px;">Your display name is taken from this email address. ADMIN: only the first ADMIN can be created here; further admins are promoted by an existing ADMIN from the Staff tab.</p>
+            </div>
+            <div class="field hidden" id="ops-field">
+              <label for="ops">Your OPS manager (who you work under)</label>
+              <select id="ops"></select>
+            </div>
           </div>
-          <div class="field hidden" id="ops-field">
-            <label for="ops">Your OPS manager (who you work under)</label>
-            <select id="ops"></select>
-          </div>
+          <div id="identity-msg"></div>
+          <button class="primary" id="btn-send-code" style="width:100%;">Send one-time code →</button>
         </div>
-        <div id="identity-msg"></div>
-        <button class="primary" id="btn-send-code" style="width:100%;">Send one-time code →</button>
       </div>
 
       <!-- STEP 2: code -->
