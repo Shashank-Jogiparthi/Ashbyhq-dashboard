@@ -35,6 +35,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJobUrl } from '../core/job-url.js';
+import { browserState, checkBrowser } from '../core/browser-check.js';
 import {
   enqueueScanJobs, claimNextScanJob, finishScanJob, markScanJobDuration,
   requeueStaleScanClaims, listScanJobs, scanJobCounts, getScanJobByUrl,
@@ -131,6 +132,12 @@ export function kick() { tick().catch((e) => log('kick:', e.message)); }
 
 async function tick() {
   if (!autoScanEnabled() || inFlight.size >= MAX_SCAN) return;
+  // Unlike the apply worker, this one may still claim a row without a browser:
+  // tiers 1 and 2 of scripts/scan-link.js answer a link from the local or shared
+  // inventory and never open a window. What it must never do is spend attempts on
+  // a link that needs a page it cannot load, so the capability is passed down and
+  // that case is DEFERRED (row returned, attempt refunded) instead of FAILED.
+  if (!browserState().ok) checkBrowser().catch(() => {});
   try { await requeueStaleScanClaims(STALE_MS); } catch { /* non-fatal */ }
   let job;
   try {
@@ -142,45 +149,85 @@ async function tick() {
   if (!job) return;
   inFlight.set(job.url, { jobId: job.id, startedAt: Date.now(), child: null });
   note('start', { url: job.url, attempt: job.attempts });
-  await logEvent(null, 'link_scan_start', 'scan-worker', { url: job.url, attempt: job.attempts, reason: job.reason });
+  await logEvent(null, 'link_scan_start', 'scan-worker', { url: job.url, attempt: job.attempts, reason: job.reason, browser: browserState().ok });
   run(job).catch((e) => log('run:', e.message));
 }
 
 async function run(job) {
   const url = job.url;
-  const outcome = await runScanner(url);
+  const browserOk = browserState().ok;
+  const outcome = await runScanner(url, browserOk);
   const finishedAt = Date.now();
   const durationMs = finishedAt - (inFlight.get(url)?.startedAt || finishedAt);
   inFlight.delete(url);
+  const out = String(outcome.out || '');
 
   // scan-link.js reports its tier in one of three phrasings; the field count is
   // what the DEV table shows, so grab it whichever way it was written.
-  const fields = Number(String(outcome.out || '').match(/(?:Stored|Restored|Already scanned:)\D*(\d+)\s*field/)?.[1] || 0);
-  const ok = outcome.exitCode === 0 && !outcome.timedOut && !outcome.spawnError;
-  const errorText = outcome.timedOut ? `timed out after ${Math.round(TIMEOUT_MS / 60000)}m`
-    : outcome.spawnError || (outcome.tail || '').split('\n').filter(Boolean).slice(-1)[0] || `exit ${outcome.exitCode}`;
+  const fields = Number(out.match(/(?:Stored|Restored|Already scanned:)\D*(\d+)\s*field/)?.[1] || 0);
+  // Where the inventory came from. "✓ scanned in 8s" is a cache answer, not a
+  // browser scan, and a DEV reading the table deserves to know which one happened.
+  const via = /Already scanned:/.test(out) ? 'local-cache'
+    : /Restored \d+ field\(s\) from public\.ashby_joblink_questions/.test(out) ? 'shared-cache'
+      : 'browser';
+  // This host had no browser and the link needed one: not a failure, and above
+  // all not an attempt. The row goes back untouched for a capable host.
+  const needsBrowser = !browserOk && (/NEEDS_BROWSER/.test(out) || outcome.exitCode === 3);
+  // A refused scan (listing page / "Page not found") is the LINK's fault, not the
+  // host's: retries burn here are correct, and the row should park FAILED quickly
+  // with the engine's own sentence as the reason a DEV can act on.
+  const refused = /Scan refused/.test(out);
+  const ok = !needsBrowser && outcome.exitCode === 0 && !outcome.timedOut && !outcome.spawnError;
+  const errorText = needsBrowser
+    ? `no browser on ${browserState().host} - waiting for a host that has one`
+    : outcome.timedOut ? `timed out after ${Math.round(TIMEOUT_MS / 60000)}m`
+      : outcome.spawnError || describeFailure(out, outcome) || `exit ${outcome.exitCode}`;
 
   try {
-    const state = await finishScanJob(job.id, { ok, fields, error: ok ? null : errorText, maxAttempts: job.max_attempts, attempts: job.attempts });
-    await markScanJobDuration(job.id, durationMs);
+    const state = await finishScanJob(job.id, {
+      ok, defer: needsBrowser, fields, via,
+      // A refused link has nothing to retry with the same URL, so do not spend
+      // the remaining attempts grinding the same page: park it now.
+      attempts: refused ? job.max_attempts : job.attempts,
+      error: ok ? null : errorText, maxAttempts: job.max_attempts
+    });
+    if (!needsBrowser) await markScanJobDuration(job.id, durationMs);
 
     if (ok) {
       const warmed = await prewarmDrafts(url);
       await logEvent(null, 'link_scan_done', 'scan-worker', {
-        url, fields, seconds: Math.round(durationMs / 1000), attempt: job.attempts, prewarm: warmed || null
+        url, fields, via, seconds: Math.round(durationMs / 1000), attempt: job.attempts, prewarm: warmed || null
       });
-      log(`done (${fields || '?'} fields, ${Math.round(durationMs / 1000)}s${warmed ? `, drafted ${warmed.apps} applicant(s)` : ''}): ${url}`);
+      log(`done (${fields || '?'} fields via ${via}, ${Math.round(durationMs / 1000)}s${warmed ? `, drafted ${warmed.apps} applicant(s)` : ''}): ${url}`);
+    } else if (needsBrowser) {
+      await logEvent(null, 'link_scan_deferred', 'scan-worker', { url, error: errorText, host: browserState().host });
+      log(`deferred (no browser here): ${url}`);
     } else {
       await logEvent(null, `link_scan_${state === 'FAILED' ? 'failed' : 'retry'}`, 'scan-worker', {
-        url, attempt: job.attempts, maxAttempts: job.max_attempts, error: String(errorText).slice(0, 300)
+        url, attempt: job.attempts, maxAttempts: job.max_attempts, via, error: String(errorText).slice(0, 300)
       });
-      log(`${state.toLowerCase()} (attempt ${job.attempts}/${job.max_attempts}): ${url}`);
+      log(`${state.toLowerCase()} (attempt ${job.attempts}/${job.max_attempts}): ${url} — ${String(errorText).slice(0, 180)}`);
     }
-    note('done', { url, ok, fields, state });
+    note('done', { url, ok, fields, via, state });
   } catch (err) {
     log('finish failed:', err.message);
   }
   kick();                                    // next row, if any is due
+}
+
+/* The last line of a failed child is usually the WRAPPER's summary ("No scan
+   output produced"), which describes nothing. The engine's own message is one
+   line earlier and is the whole reason - losing it is why the Railway browser
+   outage read as an unsolvable mystery for five links and two apply runs. */
+const FAILURE_SIG = /Fatal error|Scan failed|Scan refused|Error:|error while loading|Executable doesn't exist|browserType|Cannot find module|ENOENT|EACCES|timed out|Timeout\d+ms|out of memory|heap$/i;
+function describeFailure(out, outcome) {
+  const lines = String(out || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return 'the scan produced no output at all (the engine never reported anything)';
+  const meaningful = lines.filter((l) => FAILURE_SIG.test(l) && !/^No scan output produced/.test(l));
+  const picked = (meaningful.length ? meaningful.slice(-2) : lines.filter((l) => !/^No scan output produced/.test(l)).slice(-1));
+  const summary = picked.join(' | ');
+  if (summary) return summary.slice(0, 300);
+  return (outcome.tail || '').slice(-200).trim() || `exit ${outcome.exitCode}`;
 }
 
 /* ------------------------- draft pre-warming ------------------------- */
@@ -226,7 +273,9 @@ async function prewarmDrafts(url) {
 // exactly ONE scan implementation (local cache -> shared Azure cache -> live
 // SCAN_ONLY Chromium -> publish to both). Output is kept bounded: the tail is
 // what a DEV reads when a link parks as FAILED.
-function runScanner(url) {
+// `allowBrowser=false` puts the child in cache-only mode: it may still answer the
+// link from an inventory, but it will never try to open a window it cannot open.
+function runScanner(url, allowBrowser = true) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
     let child;
@@ -236,7 +285,7 @@ function runScanner(url) {
         // Scans are evidence-free structure capture: no form is filled and
         // nothing is submitted, so a hidden window is safe and keeps the
         // operator's screen free for the headed APPLY runs.
-        env: { ...process.env, SCAN_ONLY: 'true', SCAN_HEADLESS: process.env.SCAN_HEADLESS ?? 'true' },
+        env: { ...process.env, SCAN_ONLY: 'true', SCAN_HEADLESS: process.env.SCAN_HEADLESS ?? 'true', SCAN_NO_BROWSER: allowBrowser ? 'false' : 'true' },
         stdio: ['ignore', 'pipe', 'pipe']
       });
     } catch (err) {
@@ -276,6 +325,7 @@ function runScanner(url) {
 /** Live view for the DEV pane: what is running, due, and recently finished. */
 export async function scanQueueState({ limit = 15 } = {}) {
   const [counts, recent] = await Promise.all([scanJobCounts(), listScanJobs({ limit })]);
+  const browser = browserState();
   return {
     enabled: autoScanEnabled(),
     prewarm: draftPrewarmEnabled(),
@@ -285,6 +335,10 @@ export async function scanQueueState({ limit = 15 } = {}) {
     maxConcurrent: MAX_SCAN,
     pollMs: POLL_MS,
     timeoutMs: TIMEOUT_MS,
+    // This host's own answer to "can you open a window". A browserless container
+    // still drains the cache tiers, so the DEV pane has to say which of the two
+    // it is looking at - otherwise "0 pending, nothing running" reads as healthy.
+    browser: { ok: browser.ok, host: browser.host, note: browser.note, checked: browser.checked },
     counts,
     running: [...inFlight.entries()].map(([url, v]) => ({
       url, jobId: v.jobId, seconds: Math.round((Date.now() - v.startedAt) / 1000)
@@ -292,7 +346,7 @@ export async function scanQueueState({ limit = 15 } = {}) {
     recent: recent.map((r) => ({
       id: r.id, url: r.url, link_id: r.link_id, status: r.status, reason: r.reason,
       attempts: r.attempts, max_attempts: r.max_attempts, fields: r.fields,
-      last_error: r.last_error, next_attempt_at: r.next_attempt_at,
+      scan_via: r.scan_via, last_error: r.last_error, next_attempt_at: r.next_attempt_at,
       duration_ms: r.duration_ms, updated_at: r.updated_at
     }))
   };

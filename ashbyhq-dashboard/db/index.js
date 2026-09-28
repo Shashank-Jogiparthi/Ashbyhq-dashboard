@@ -264,6 +264,7 @@ export async function migrate() {
   ensureColumnSqlite('applicant_field_answers', 'optional', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumnSqlite('applications', 'screenshots_json', 'TEXT');
   ensureColumnSqlite('applications', 'purged_at', 'TEXT');
+  ensureColumnSqlite('link_scan_jobs', 'scan_via', 'TEXT');
   migrateCamToOpsSqlite(s);
   console.log(`Database ready: ${path.join(DATA_DIR, 'app.db')}`);
 }
@@ -293,6 +294,9 @@ async function ensureScreenshotColumnsPostgres() {
   // Semantic question -> record-column binding, computed once per link.
   await p.query('ALTER TABLE job_link_fields ADD COLUMN IF NOT EXISTS bound_key TEXT');
   await p.query('ALTER TABLE job_link_fields ADD COLUMN IF NOT EXISTS required SMALLINT');
+  // How a scan row was answered: browser (real work) or a cache tier. A ~8s
+  // "scanned" row means nothing unless the reader can tell which it was.
+  await p.query('ALTER TABLE link_scan_jobs ADD COLUMN IF NOT EXISTS scan_via TEXT');
 }
 
 async function migrateCamToOpsPostgres() {

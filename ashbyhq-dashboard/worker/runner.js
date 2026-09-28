@@ -20,11 +20,12 @@ import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import { ROOT_DIR } from '../db/index.js';
+import { browserState, checkBrowser } from '../core/browser-check.js';
 import {
   listQueuedForWorker, claimForRun, finishRun, markRunCrash,
   getSystemState, logEvent, listFieldAnswers,
   recordSubmitMissingFields, reopenForMissingFields,
-  getApplicationById, purgeApplicantFormData
+  getApplicationById, purgeApplicantFormData, handBackToQueue
 } from '../db/store.js';
 
 const WORKSPACE_ROOT = path.resolve(ROOT_DIR, '..');
@@ -58,6 +59,11 @@ const RUNS_DIR = process.env.RUN_TMP_DIR || path.join(os.tmpdir(), 'applywizz-ru
 // so a container can be pinned to "never drive a browser" while the operator's
 // workstation keeps claiming runs (and vice versa).
 const HOST_OPT_OUT = String(process.env.WORKER_ENABLED || '').toLowerCase() === 'false';
+// Capability gate (core/browser-check.js). The queue is SHARED, so this is the
+// only thing that stops a host without a browser from claiming a real CA
+// application and destroying it with a launch error. Unlike HOST_OPT_OUT it is
+// not a preference: it is the answer to "can this machine open a window at all".
+let browserWarned = false;
 
 const active = new Set();          // application ids in flight
 const scheduled = new Set();       // ids with a staggered launch still pending
@@ -65,6 +71,7 @@ let pollTimer = null;
 let started = false;
 
 export async function workerStatus() {
+  const browser = browserState();
   return {
     started,
     active: active.size,
@@ -73,7 +80,10 @@ export async function workerStatus() {
     startSpacingMs: START_SPACING_MS,
     engine: fs.existsSync(ENGINE_PATH) ? ENGINE_PATH : 'MISSING',
     hostEnabled: !HOST_OPT_OUT,
-    enabled: !HOST_OPT_OUT && await getSystemState('worker_enabled') === 'true'
+    // Surfaced so a DEV can see WHY a queue is not moving instead of guessing.
+    browser: { ok: browser.ok, host: browser.host, note: browser.note, exec: browser.exec, checked: browser.checked },
+    canClaim: !HOST_OPT_OUT && browser.ok,
+    enabled: !HOST_OPT_OUT && browser.ok && await getSystemState('worker_enabled') === 'true'
   };
 }
 
@@ -85,6 +95,7 @@ export async function start() {
   console.log(`Worker started (${Number.isFinite(MAX_CONCURRENT) ? `max ${MAX_CONCURRENT}` : 'unlimited'} concurrent browsers, `
     + `headless ${HEADLESS_APPLY ? 'on' : 'off (visible windows)'}${START_SPACING_MS ? `, starts spaced ${START_SPACING_MS}ms` : ''}, poll ${POLL_MS}ms).`);
   if (HOST_OPT_OUT) console.log('Worker idle: WORKER_ENABLED=false for this host (shared queue untouched).');
+  else if (!browserState().ok) checkBrowser().catch(() => {});   // answers on its own
   tick();
   return workerStatus();
 }
@@ -103,6 +114,19 @@ export function kick() { tick().catch((e) => console.error('worker kick:', e.mes
 
 async function tick() {
   if (HOST_OPT_OUT) return;
+  // Never claim work this host cannot finish. The probe is re-run by
+  // checkBrowser() on its own cadence, so installing a browser starts the
+  // queue moving again without a redeploy - and the same rule holds for the
+  // next container nobody has thought about yet.
+  if (!browserState().ok) {
+    if (!browserWarned && browserState().checked) {
+      browserWarned = true;
+      console.log(`Worker idle: no usable browser on ${browserState().host} (${browserState().note}). Queued applications stay QUEUED for a host that can drive one.`);
+    }
+    checkBrowser().catch(() => {});
+    return;
+  }
+  browserWarned = false;
   if (await getSystemState('worker_enabled') !== 'true') return;
   const free = MAX_CONCURRENT - active.size;
   if (free <= 0) return;
@@ -165,6 +189,16 @@ async function launch(app) {
 
   await logEvent(app.id, 'run_started', 'worker', { run_id: runId, url: app.url });
 
+  // The engine writes its own fatal error to stderr and nothing else survives
+  // the run directory, so keep a bounded echo of it here. It is the only way to
+  // tell "this machine has no browser" apart from "the form rejected us".
+  let childOut = '';
+  const echo = (chunk, stream, prefix) => {
+    childOut += chunk;
+    if (childOut.length > 16_000) childOut = childOut.slice(-12_000);
+    stream.write(`${prefix}${chunk}`);
+  };
+
   const finish = async () => {
     active.delete(app.id);
     let outcome = 'failed';
@@ -177,6 +211,22 @@ async function launch(app) {
       else if (status === 'failed') { outcome = 'failed'; reason = result.bannerText || result.reason || 'Validation error'; }
       else if (status === 'unknown' || status === 'manual-review' || status === 'pending') { outcome = 'pending'; reason = status === 'manual-review' ? 'No submit button (manual review)' : 'Outcome unclear'; }
       if (Array.isArray(result.missingFields)) missingFields = result.missingFields;
+    }
+    // Host fault, not applicant fault: a machine that could not start a browser
+    // hands the application back to the queue instead of filing a FAILED record,
+    // and re-probes itself right now so it stops claiming further runs.
+    if (outcome !== 'success' && looksLikeNoBrowser(childOut)) {
+      const detail = String(childOut).split('\n').find((l) => NO_BROWSER_SIG.test(l))?.trim() || 'browser unavailable';
+      try {
+        await handBackToQueue(app.id, detail.slice(0, 300));
+        await logEvent(app.id, 'run_deferred_no_browser', 'worker', { run_id: runId, host: browserState().host, error: detail.slice(0, 300) });
+        console.log(`[run ${app.id}] no usable browser on ${browserState().host} - application handed back to the queue: ${detail.slice(0, 160)}`);
+      } catch (err) {
+        try { await markRunCrash(app.id, `Hand-back failed: ${err.message}`); } catch { /* ignore */ }
+      }
+      checkBrowser({ force: true }).catch(() => {});
+      cleanupRun(runDir);
+      return;
     }
     // Two evidence screenshots are captured per run: #1 the fully-filled form
     // BEFORE Submit, #2 the post-submit acknowledgement. They live only in the
@@ -232,8 +282,8 @@ async function launch(app) {
         APPLICANT_DATA_DIR: storeDir
       }
     });
-    child.stdout.on('data', (d) => process.stdout.write(`[run ${app.id}] ${d}`));
-    child.stderr.on('data', (d) => process.stderr.write(`[run ${app.id}!] ${d}`));
+    child.stdout.on('data', (d) => echo(d, process.stdout, `[run ${app.id}] `));
+    child.stderr.on('data', (d) => echo(d, process.stderr, `[run ${app.id}!] `));
     child.on('close', () => finish());
     child.on('error', async (err) => {
       active.delete(app.id);
@@ -244,6 +294,16 @@ async function launch(app) {
 }
 
 /* ------------------------------ helpers ----------------------------- */
+
+// Signatures of "this machine could not produce a browser at all", as opposed to
+// "the automation tried and something on the page went wrong". Only the first
+// one is a host fault, and only a host fault may send an application back to the
+// queue untouched - the applicant must never carry a machine's missing binary as
+// a FAILED record.
+const NO_BROWSER_SIG = /Executable doesn't exist|Please run the following command to download new browsers|Failed to launch the browser process|error while loading shared libraries|browserType\.launch/i;
+function looksLikeNoBrowser(output) {
+  return NO_BROWSER_SIG.test(String(output || ''));
+}
 
 // Load the merged CRM profile into `app` in place when it is missing/empty.
 // Never throws: with no CRM configured the run proceeds on whatever is stored.

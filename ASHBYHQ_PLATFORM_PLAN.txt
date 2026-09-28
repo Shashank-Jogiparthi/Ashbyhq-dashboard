@@ -670,5 +670,127 @@ RESTRICTIONS gate is UI-only by design (the endpoint stays a
      moving a CA between CAMs does NOT retro-reassign existing
      applications - use the CAM Job Links matrix for that.
 
-END OF CURRENT-STATE DOC (v3.2) - previous v2 plan superseded; base
+====================================================================
+11. v3.3 - BROWSER CAPABILITY GATE (no host claims what it cannot finish)
+====================================================================
+THE INCIDENT THIS EXISTS FOR
+  Five links were ingested and every one "failed" in ~9s with "No
+  scan output produced (engine exit code 1)"; two applicants then
+  went FAILED with "Engine process exited without a result". The
+  links and the applicants were fine. The real line, buried under
+  the wrapper, was
+     browserType.launch: Executable doesn't exist at
+     /root/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome
+  i.e. a MACHINE was missing a browser and the damage was filed
+  against other people's data. Three separate defects let that
+  happen, and all three are now closed structurally:
+  (a) the queue lives in SHARED Postgres, so the browserless
+      Railway container claimed real work it could never finish;
+  (b) nothing ever installed a browser - root package.json's
+      postinstall only installs dashboard deps, so a deployed
+      host has the playwright LIBRARY and no binary;
+  (c) a listing/404 page can be "scanned" into a 1-field junk
+      inventory, which is then published to the shared cache and
+      served as the truth to every later applicant everywhere.
+
+WHAT  core/browser-probe.js + core/browser-check.js
+HOW   the probe is a child process that mirrors the ENGINE's own
+      resolution order (CHROME_PATH -> installed Chrome on Windows
+      -> Playwright's bundled Chromium), launches headless, opens
+      about:blank and closes. It answers on ONE tab-separated
+      stdout line prefixed BROWSER_PROBE (tabs because Windows
+      paths contain spaces; the prefix because dotenv prints an
+      "injected env" banner on the same stdout), tagged
+      OK / MISSING / NOLOAD / NOEXEC / LAUNCHFAIL. browser-check.js
+      caches that verdict in-process, loads .env for the child, and
+      never touches the network.
+WHY   existsSync() is not the truth: the incident was exactly
+      "the host looked capable and was not", and the next variant
+      (no libnss3, no /dev/shm, read-only FS) would pass a file
+      check too. Launching is the only honest answer. Mirroring the
+      engine's order matters the other way: probe only the bundled
+      Chromium and a laptop with real Chrome is pinned off forever.
+      NOT awaited at boot (server.js fires it and moves on) because
+      a first launch can take tens of seconds and HTTP cannot wait;
+      until it answers every tick declines to claim, which is the
+      safe direction. Fail-closed by default.
+
+THE GATE IN THE TWO WORKERS
+  apply worker (worker/runner.js): will not claim a run without a
+  proven browser.
+  scan worker (worker/link-scanner.js): cache tiers need no browser,
+  so a browserless host still answers a link the shared/local cache
+  already knows; if a real page load is required it exits 3
+  (NEEDS_BROWSER) and the row is DEFERRED - attempt REFUNDED, back
+  to PENDING, next_attempt_at = now + SCAN_DEFER_MS (default 5m) -
+  so a link cannot be killed by being parked on the wrong machine.
+  A "Scan refused" is the LINK's fault, not the host's: attempts are
+  maxed so it parks FAILED at once instead of burning retries.
+  Host fault vs applicant fault: an apply run that dies on a missing
+  browser is handed back (handBackToQueue: APPLYING -> QUEUED, the
+  machine's error is NOT stored as the applicant's fail_reason, a
+  application.handback event is logged). SUCCESS is never re-opened.
+
+PROVENANCE + JUNK REFUSAL
+  link_scan_jobs.scan_via (local-cache | shared-cache | browser,
+  NULL on failure) makes an 8s "✓ scanned" legible as a cache answer
+  instead of pretending a page was loaded; the DEV pane shows it and
+  a live browser-capability pill for the host. core/scan-verdict.js
+  holds the pure rules (judgeScan / inventoryIsResidue /
+  isApplicationFormUrl) used by BOTH the scanner and verify:flow: a
+  scan whose page text reads like a listing/404, or that yields one
+  field on a URL that is not an /application form, is refused -
+  nothing stored, nothing published, and any residue already cached
+  for that link is deleted on both the store and the restore side.
+  Tier 1 also self-heals: if this install's local inventory is
+  richer than the shared row (the CRM trigger outage below left
+  several like that), the shared cache is republished from local.
+
+SHARED-CACHE PUBLISH = DELETE + INSERT
+  connector/joblink-questions.js no longer uses ON CONFLICT ... DO
+  UPDATE. The client added a BEFORE UPDATE trigger on
+  ashby_joblink_questions that reads NEW.user_id - a column that
+  table (job_id/job_link/questions) has never had - so ANY update of
+  an existing row raised `record "new" has no field "user_id"` and
+  the publish failed silently for weeks. DELETE+INSERT is the same
+  replacement, fires only INSERT/DELETE triggers, and cannot be
+  blocked by a rule that was only ever about updates.
+
+BUILD-TIME BROWSER (scripts/ensure-browser.js, repo root)
+  npm run browser:install, appended to railway.json's buildCommand
+  after both installs: idempotent (skips when the bundled Chromium
+  already exists or CHROME_PATH points at a real file), and it NEVER
+  fails the build - a host it cannot equip is a host the gate pins
+  off with the reason in the DEV pane, whereas a failed build takes
+  the whole platform down. playwright/cli.js is NOT in the package's
+  "exports" map, so the CLI path is derived from
+  require.resolve('playwright/package.json') + dirname, not from
+  require.resolve('playwright/cli.js'). Opt-out:
+  APPLYWIZZ_SKIP_BROWSER_INSTALL=true. It is deliberately not in
+  postinstall, so a local npm install never pulls ~150MB unasked.
+
+VERIFICATION (npm run verify:flow, now 80 assertions)
+  new verifyCapabilityGate() (fail-closed default, verdict rules, a
+  REAL cache-only scan-link.js spawn with SCAN_NO_BROWSER=true that
+  must exit 3 without launching, the defer/attempt-refund/
+  next_attempt_at bookkeeping, scan_via written then cleared) and
+  verifyHandBack(). Verifier hygiene on a shared DB learned the hard
+  way: claim BY URL (claimNextScanJob({claimer, now, url}) - a
+  generic "next due row" claim re-armed other people's work),
+  snapshot/restore foreign FAILED rows around the global requeue
+  assertion, and never assert against a newest-N event window -
+  live CA traffic raced the checks, so every feed assertion is
+  scoped to its own application_id.
+
+RESTRICTIONS the gate is per-host and re-measured, not a config
+     switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
+     operator override, but it can only pin a host OFF, never claim
+     capability it does not have.
+     A browserless host answers cache hits only; anything needing a
+     page load defers quietly for a capable host.
+     Refusal is per-SCAN: a genuinely single-question application
+     form is fine as long as its URL ends in /application.
+     scan_via is provenance for humans, not a security property.
+
+END OF CURRENT-STATE DOC (v3.3) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

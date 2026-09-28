@@ -825,20 +825,42 @@ async function renderDevSystem() {
 function preScanQueueCard(queue = {}) {
   const c = queue.counts || {};
   const pill = (label, n, cls) => `<span class="pill ${cls || ''}" style="margin-right:6px;">${label} <b>${n || 0}</b></span>`;
+  // Which host is answering, and what it is capable of. The queue lives in the
+  // SHARED database, so any server can claim any row: without this line a
+  // container that cannot open a browser looks identically healthy to a laptop
+  // that can, and "✓ scanned 8s" (a cache answer) looks like real work.
+  const br = queue.browser || {};
+  const browserPill = br.checked
+    ? (br.ok
+      ? `<span class="pill green" style="margin-right:6px;" title="${esc(br.exec || br.note || '')}">browser ready</span>`
+      : `<span class="pill red" style="margin-right:6px;" title="${esc(br.note || '')}">no browser on ${esc(br.host || '?')}</span>`)
+    : '<span class="pill" style="margin-right:6px;">checking browser…</span>';
+  const viaTag = (j) => {
+    if (j.status !== 'DONE') return '';
+    const label = j.scan_via === 'local-cache' ? 'local cache'
+      : j.scan_via === 'shared-cache' ? 'shared cache'
+        : j.scan_via === 'browser' ? 'browser scan' : '';
+    return label ? `<br><span class="muted small">${label}</span>` : '';
+  };
   const bits = [];
   bits.push(`<p style="margin:6px 0;">
-    ${pill('pending', c.PENDING)}${pill('scanning', c.RUNNING)}${pill('done', c.DONE, 'green')}
+    ${browserPill}${pill('pending', c.PENDING)}${pill('scanning', c.RUNNING)}${pill('done', c.DONE, 'green')}
     ${c.FAILED ? pill('failed', c.FAILED, 'red') : ''}
     <span class="muted small">· headless ${queue.headless === false ? 'OFF (visible window)' : 'ON'} · drafts pre-warmed ${queue.prewarm === false ? 'OFF' : 'ON'} · ${queue.maxConcurrent || 1} at a time</span>
   </p>`);
+  if (br.ok === false && br.checked) {
+    bits.push(`<p class="muted small" style="margin-top:2px;">This host cannot launch a browser (${esc(br.note || 'unknown reason')}).
+      It still answers links from a cached inventory, and anything that needs a page load is
+      <b>left queued for a machine that has one</b> — it is never counted as a failed link.</p>`);
+  }
   if (queue.running?.length) {
     bits.push(`<p class="muted small">${queue.running.map((r) => `▶ <span class="mono">${esc(r.url)}</span> — ${r.seconds}s (job #${r.jobId})`).join('<br>')}</p>`);
   }
   if (queue.recent?.length) {
     bits.push(tableHtml(['link', 'state', 'tries', 'fields', 'took', 'last error / why'], queue.recent.map((j) => [
       `<span class="mono small">${esc(j.url)}</span>`,
-      j.status === 'DONE' ? '<b>✓ scanned</b>' : j.status === 'FAILED' ? '<span class="pill">✗ failed</span>'
-        : j.status === 'RUNNING' ? '⏳ scanning' : '🕐 queued',
+      (j.status === 'DONE' ? '<b>✓ scanned</b>' : j.status === 'FAILED' ? '<span class="pill">✗ failed</span>'
+        : j.status === 'RUNNING' ? '⏳ scanning' : '🕐 queued') + viaTag(j),
       `${j.attempts}/${j.max_attempts}`,
       j.fields || '—',
       j.duration_ms ? `${Math.round(j.duration_ms / 1000)}s` : '—',
@@ -961,6 +983,12 @@ async function renderDevDataSync() {
         browser: <b>${ws.headless ? 'headless' : 'headed (visible)'}</b>${ws.startSpacingMs ? ` · starts spaced ${ws.startSpacingMs}ms` : ''} ·
         ${ws.hostEnabled === false ? '<b style="color:var(--coral)">this host is pinned off (WORKER_ENABLED=false)</b> · ' : ''}
         engine: <span class="mono">${esc(ws.engine || '—')}</span></p>
+      <p class="muted small">Browser capability of <b>${esc(ws.browser?.host || 'this host')}</b>: ${ws.browser?.checked
+        ? (ws.browser.ok
+          ? `<span class="pill green">ready</span> <span class="mono">${esc(ws.browser.exec || '')}</span>`
+          : `<span class="pill red">unavailable</span> ${esc(ws.browser.note || '')} — <b>queued applications are not claimed here</b>; they wait for a machine that can open a window.`)
+        : '<span class="pill">probe not run yet</span>'}
+      — this is measured by launching a browser, not by an environment variable, so it cannot be wrong about the machine.</p>
       <div class="actions">
         <button class="green" id="btn-worker-on" ${data.system.workerEnabled ? 'disabled' : ''}>▶ Enable worker</button>
         <button class="danger" id="btn-worker-off" ${data.system.workerEnabled ? '' : 'disabled'}>■ Disable worker</button>

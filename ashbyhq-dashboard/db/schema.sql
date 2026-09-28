@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS link_scan_jobs (
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 3,
   fields INTEGER NOT NULL DEFAULT 0,        -- questions captured by the last good scan
+  scan_via TEXT,                            -- local-cache | shared-cache | browser
   last_error TEXT,
   claimed_by TEXT,                          -- process tag, so a dead claim can be re-taken
   claimed_at TEXT,

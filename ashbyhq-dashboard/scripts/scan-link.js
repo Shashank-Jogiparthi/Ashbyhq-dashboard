@@ -14,6 +14,12 @@
                                         inventory locally AND push it to the
                                         shared cache keyed by job_id + job_link
 
+   Tiers 1 and 2 need no browser, so a machine that cannot launch one can still
+   answer a link. Setting SCAN_NO_BROWSER=true (the scan worker does, from its own
+   browser capability probe) stops the script BEFORE tier 3: it prints NEEDS_BROWSER
+   and exits 3, which the worker reads as "defer this row for a host that has a
+   browser" rather than "this link is broken".
+
    Before this script, links were only registered by an applicant sync; the
    dashboard now also accepts pasted (AWL-ID -> link) pairs (POST /api/dev/links),
    which is what puts the link into job_links + the shared cache.
@@ -28,6 +34,7 @@ import { migrate, db, nowIso } from '../db/index.js';
 import { saveJobLinkFields, listJobLinkFields } from '../db/store.js';
 import { upsertJobLinkQuestions, fetchJobLinkQuestions, jobIdFromUrl, normalizeJobLink } from '../connector/joblink-questions.js';
 import { companyFromUrl } from '../core/job-url.js';
+import { judgeScan, inventoryIsResidue } from '../core/scan-verdict.js';
 import { summarizeField } from '../../genai-resume-filler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -37,6 +44,8 @@ dotenv.config({ path: path.join(REPO, '.env') });
 
 const argv = process.argv.slice(2);
 const FORCE = argv.includes('--force');
+// Cache-only mode, decided by the caller's browser probe (never by a guess).
+const NO_BROWSER = String(process.env.SCAN_NO_BROWSER || '').toLowerCase() === 'true';
 const url = argv.find((a) => !a.startsWith('--'));
 if (!url) {
   console.error('usage: node scripts/scan-link.js "<job-url>"   (no built-in default link)');
@@ -61,17 +70,57 @@ if (!row) {
 const linkId = Number(row?.id);
 if (!linkId) { console.error('Could not resolve a job_links id for this URL.'); process.exit(1); }
 
+// The shared cache stores the scan SHAPE ({ question, kind, options }); the local
+// table stores the row shape. Used only to re-publish what this install already
+// knows, never to re-save anything locally.
+const toSharedShape = (rows) => rows.map((r) => {
+  let options = [];
+  try { options = JSON.parse(r.options_json || '[]'); } catch { options = []; }
+  return {
+    field_key: r.field_key,
+    question: r.question_text,
+    kind: r.field_type,
+    options: Array.isArray(options) ? options : [],
+    required: r.required === 1 ? true : (r.required === 0 ? false : null),
+    ...(r.question_summary ? { question_summary: r.question_summary } : {})
+  };
+});
+
 // 1. local inventory already exists
+// An inventory of a single field on a non-/application URL is not "already
+// scanned", it is the residue of a listing page (core/scan-verdict.js). Falling
+// through lets a browser-capable host re-scan and clear it instead of every
+// later applicant being served that junk from the cache.
 if (!FORCE) {
   const local = await listJobLinkFields(linkId);
-  if (local.length) {
+  if (local.length && !inventoryIsResidue(local, link)) {
     console.log(`\nAlready scanned: ${local.length} field(s) cached locally for job_links.id=${linkId} (job_id ${jobId}).`);
+    // Self-heal the SHARED cache. A link can hold a complete local inventory
+    // while the shared row is still the empty '[]' created at ingest — a publish
+    // that died on a CRM trigger, an install that scanned before the cache
+    // existed, a host that lost the write. Left alone, every other machine keeps
+    // re-scanning (or, with no browser, deferring) a link that is already known,
+    // and short-circuiting here is exactly what hides it. One read, and one write
+    // only when the shared copy is BEHIND (never downgrade a richer row).
+    try {
+      const shared = await fetchJobLinkQuestions(link);
+      const have = shared?.questions?.length || 0;
+      if (have < local.length) {
+        const pushed = await upsertJobLinkQuestions({ url: link, questions: toSharedShape(local) });
+        console.log(pushed.ok
+          ? `Shared cache refreshed from this install's inventory (${have} -> ${pushed.count ?? local.length} question(s)).`
+          : `Shared cache still stale (${pushed.error || pushed.skipped}); the local inventory still answers this install.`);
+      }
+    } catch (err) {
+      console.log(`(shared-cache check skipped: ${String(err.message || err).slice(0, 80)})`);
+    }
     console.log('Use --force to re-scan with a browser.');
     process.exit(0);
   }
+  if (local.length) console.log('Local inventory is a single field on a non-form URL — treating it as unscanned and re-checking.');
   // 2. shared cache hit -> restore, no browser
   const cached = await fetchJobLinkQuestions(link);
-  if (cached?.questions?.length) {
+  if (cached?.questions?.length && !inventoryIsResidue(cached.questions, link)) {
     const n = await saveJobLinkFields(linkId, cached.questions);
     console.log(`\nRestored ${n} field(s) from public.ashby_joblink_questions (job_id ${cached.job_id}) — no browser needed.`);
     cached.questions.forEach((f, i) => console.log(`  ${i + 1}. [${f.kind || 'text'}] ${String(f.question || f.field_key || '').slice(0, 110)}`));
@@ -97,7 +146,18 @@ function postingTitle(posting = {}) {
   return '';
 }
 
+/* A near-empty "form" is never a form — the rule and its history live in
+   core/scan-verdict.js, which is asserted by scripts/verify-flow.js. Nothing is
+   stored or published until the scan passes it. */
+
 // 3. scan live
+if (NO_BROWSER) {
+  // Reached only when both inventory tiers missed, so the link genuinely needs a
+  // page load. Say so in one machine-readable line and leave the row for a host
+  // that can open a window.
+  console.log(`NEEDS_BROWSER: no cached inventory for ${link} and this host has no usable browser`);
+  process.exit(3);
+}
 const out = path.join(os.tmpdir(), `field-scan-${Date.now()}.json`);
 // The worker drives this path with SCAN_HEADLESS=true (default) so background
 // scanning never steals the operator's screen; 'false' opens a visible window.
@@ -118,6 +178,26 @@ child.on('exit', async (code) => {
   }
   const scan = JSON.parse(fs.readFileSync(out, 'utf8'));
   const fields = scan.fields || [];
+
+  // Nothing is written — locally or to the shared cache — until the scan is
+  // provably an application form.
+  const verdict = judgeScan(scan, link);
+  if (!verdict.ok) {
+    try { fs.unlinkSync(out); } catch { /* temp file only */ }
+    // Clear a previously stored one-field inventory so the review pane cannot
+    // keep showing junk after this link has been correctly refused. A real
+    // inventory (2+ fields) is never touched here.
+    try {
+      const prior = await listJobLinkFields(linkId);
+      if (inventoryIsResidue(prior, link)) {
+        await db.prepare('DELETE FROM job_link_fields WHERE link_id = ?').run(linkId);
+        console.log('Cleared the stale single-field inventory that was cached for this link.');
+      }
+    } catch { /* best effort */ }
+    console.error(`Scan refused: ${verdict.why}`);
+    console.error('Nothing was stored or published. If this URL is a job listing, replace it with the real application link (jobs.ashbyhq.com/<company>/<posting-id>/application).');
+    process.exit(4);
+  }
 
   // The scan saw the real posting page, so it also names the job. Replace the
   // "Role" placeholder (and nothing else — a title that came from the CRM wins).

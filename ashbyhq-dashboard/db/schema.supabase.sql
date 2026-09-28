@@ -257,6 +257,7 @@ CREATE TABLE IF NOT EXISTS link_scan_jobs (
   attempts         INTEGER NOT NULL DEFAULT 0,
   max_attempts     INTEGER NOT NULL DEFAULT 3,
   fields           INTEGER NOT NULL DEFAULT 0,
+  scan_via         TEXT,                                    -- local-cache | shared-cache | browser
   last_error       TEXT,
   claimed_by       TEXT,                                    -- process tag of the current scanner
   claimed_at       TEXT,

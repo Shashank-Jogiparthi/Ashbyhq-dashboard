@@ -10,6 +10,11 @@
      1. the durable pre-scan queue (link_scan_jobs) behaves like a worker
         queue: enqueue -> dedupe -> single-winner claim -> backoff ->
         FAILED -> retry -> DONE, and the CA pane can read its state;
+     1b. the browser CAPABILITY gate: a host that cannot prove it can launch a
+        browser never claims work it would destroy, a link needing a page load
+        is DEFERRED (attempt refunded) instead of failed, a non-form scan is
+        refused before it can poison the shared cache, and a machine fault
+        hands an application back to the queue rather than filing FAILED;
      2. an applicant is addressable by AWL-ID alone (profile present /
         needs a fetch);
      3. the post-SUCCESS privacy erase removes the form data and keeps
@@ -24,13 +29,19 @@
    expects "seen 0" (proves the fetch path works without a browser).
    ===================================================================== */
 import { migrate, db, nowIso, BACKEND } from '../db/index.js';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   enqueueScanJobs, claimNextScanJob, finishScanJob, markScanJobDuration,
   requeueFailedScanJobs, scanJobCounts, getScanJobByUrl, listEvents,
   purgeApplicantFormData, applicantNeedsProfile, logEvent, upsertFieldAnswer,
-  listFieldAnswers, hasBlockingMissingFacts, saveJobLinkFields, applyCaEdits
+  listFieldAnswers, hasBlockingMissingFacts, saveJobLinkFields, applyCaEdits,
+  handBackToQueue
 } from '../db/store.js';
 import { scanStateForUrl } from '../worker/link-scanner.js';
+import { browserState, canDriveBrowsers } from '../core/browser-check.js';
+import { judgeScan, inventoryIsResidue } from '../core/scan-verdict.js';
 import { buildReviewQuestions, questionIsOptional } from '../draft-service.js';
 import { fieldKeyOf } from '../../field-applier.js';
 import { __internals } from '../../genai-resume-filler.js';
@@ -38,9 +49,11 @@ import { __internals } from '../../genai-resume-filler.js';
 const AWL = 'AWL-VERIFY-1';
 const URL_A = 'https://jobs.ashbyhq.com/verify/11111111-1111-4111-8111-111111111111';
 const URL_B = 'https://jobs.ashbyhq.com/verify/22222222-2222-4222-8222-222222222222';
+const URL_C = 'https://jobs.ashbyhq.com/verify/33333333-3333-4333-8333-333333333333';
 
 let passed = 0;
 let failed = 0;
+const SCAN_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'scan-link.js');
 function check(name, ok, detail = '') {
   if (ok) { passed += 1; console.log(`  PASS  ${name}${detail ? `  (${detail})` : ''}`); }
   else { failed += 1; console.log(`  FAIL  ${name}${detail ? `  -> ${detail}` : ''}`); }
@@ -75,20 +88,15 @@ async function makeApplication(linkId, status = 'ASSIGNED') {
   return Number(found.id);
 }
 
-// The queue is global, so on a shared database a claim could hand us somebody
-// else's real link. Anything that is not our synthetic URL is put back exactly
-// as it was and we look at the next due row.
-let returnedForeign = 0;
-async function claimMine(claimer) {
-  for (let i = 0; i < 25; i += 1) {
-    const job = await claimNextScanJob({ claimer });
-    if (!job) return null;
-    if (job.url === URL_A || job.url === URL_B) return job;
-    await db.prepare(`UPDATE link_scan_jobs SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL,
-      started_at = NULL, attempts = attempts - 1, updated_at = ? WHERE id = ?`).run(nowIso(), job.id);
-    returnedForeign += 1;
-  }
-  return null;
+// The queue lives in the SHARED database, so a generic "next due row" claim can
+// hand this verifier somebody else's real link — and a row it hands back is still
+// a row it touched. Claiming BY URL keeps every assertion about the atomic CAS
+// (single winner, RUNNING stamp, due-time gate) exactly as strong, and leaves
+// every foreign row alone. `url` is required: a typo must fail loudly, not fall
+// back to grabbing a real applicant's link.
+async function claimMine(claimer, url) {
+  if (!url) throw new Error('claimMine needs the fixture URL');
+  return claimNextScanJob({ claimer, url });
 }
 
 async function cleanup() {
@@ -100,6 +108,9 @@ async function cleanup() {
   await db.prepare('DELETE FROM job_links WHERE url IN (?, ?)').run(URL_A, URL_B);
   await db.prepare('DELETE FROM job_links WHERE url_hash IN (?, ?)').run(URL_A, URL_B);
   await db.prepare('DELETE FROM link_scan_jobs WHERE url IN (?, ?)').run(URL_A, URL_B);
+  await db.prepare('DELETE FROM job_links WHERE url = ?').run(URL_C);
+  await db.prepare('DELETE FROM job_links WHERE url_hash = ?').run(URL_C);
+  await db.prepare('DELETE FROM link_scan_jobs WHERE url = ?').run(URL_C);
 }
 
 /* ------------------------------ checks ------------------------------ */
@@ -115,6 +126,10 @@ async function verifySchema() {
     check('applications.purged_at exists', true);
   } catch (err) { check('applications.purged_at exists', false, err.message); }
   try {
+    await db.prepare('SELECT scan_via FROM link_scan_jobs LIMIT 0').all();
+    check('link_scan_jobs.scan_via exists (a cache answer must not look like a scan)', true);
+  } catch (err) { check('link_scan_jobs.scan_via exists', false, err.message); }
+  try {
     await db.prepare('SELECT screenshots_json, fail_reason, screenshot_path FROM applications LIMIT 0').all();
     check('status + reason + screenshot columns exist', true);
   } catch (err) { check('status + reason + screenshot columns exist', false, err.message); }
@@ -127,9 +142,9 @@ async function verifyScanQueue() {
   const q2 = await enqueueScanJobs([URL_A], { reason: 'verify' });
   check('a second intent for the same link dedupes', q2.queued.length === 0 && q2.skipped[0]?.why === 'already_queued', JSON.stringify(q2.skipped));
 
-  const job = await claimMine('verify-process');
+  const job = await claimMine('verify-process', URL_A);
   check('a claim wins the row and stamps RUNNING', job?.url === URL_A && job.status === 'RUNNING' && job.attempts === 1, `attempt ${job?.attempts}`);
-  check('no second worker can take the same row', (await claimMine('verify-other'))?.id !== job?.id);
+  check('no second worker can take a claimed row', !(await claimMine('verify-other', URL_A)));
   check('CA pane reports the live scan', (await scanStateForUrl(URL_A)) === 'pre_scanning');
 
   const retry = await finishScanJob(job.id, { ok: false, error: 'verify: simulated failure', maxAttempts: 3, attempts: 1 });
@@ -138,22 +153,35 @@ async function verifyScanQueue() {
     `next attempt at ${String(row1.next_attempt_at).slice(11, 19)}`);
   check('the reason is kept for the DEV', /simulated failure/.test(row1.last_error || ''), row1.last_error);
   check('CA pane says "queued" while it waits', (await scanStateForUrl(URL_A)) === 'queued');
-  check('a due-time row is not claimable yet', (await claimMine('verify-early'))?.id !== row1.id);
+  check('a due-time row is not claimable yet', !(await claimMine('verify-early', URL_A)));
 
   await db.prepare('UPDATE link_scan_jobs SET next_attempt_at = NULL, status = ? WHERE url = ?').run('PENDING', URL_A);
-  await claimMine('verify-process');                                           // attempt 2
+  await claimMine('verify-process', URL_A);                                     // attempt 2
   await finishScanJob(row1.id, { ok: false, error: 'verify: again', maxAttempts: 3, attempts: 2 });
   await db.prepare('UPDATE link_scan_jobs SET next_attempt_at = NULL WHERE url = ?').run(URL_A);
-  await claimMine('verify-process');                                           // attempt 3
+  await claimMine('verify-process', URL_A);                                     // attempt 3
   const parked = await finishScanJob(row1.id, { ok: false, error: 'verify: exhausted', maxAttempts: 3, attempts: 3 });
   check('after max_attempts the link parks as FAILED', parked === 'FAILED' && (await getScanJobByUrl(URL_A)).status === 'FAILED', `attempts ${(await getScanJobByUrl(URL_A)).attempts}`);
   check('CA pane says the scan failed', (await scanStateForUrl(URL_A)) === 'failed');
 
+  // The DEV retry button is deliberately global ("retry everything that gave
+  // up"), so on a shared DB it would re-arm real links too: snapshot them and put
+  // them back exactly as found, so the assertion proves the button works without
+  // this verifier touching anybody else's queue.
+  const foreign = await db.prepare(`SELECT id, status, attempts, last_error, next_attempt_at FROM link_scan_jobs
+    WHERE status = 'FAILED' AND url <> ?`).all(URL_A);
   const requeued = await requeueFailedScanJobs();
-  check('the DEV retry button re-arms failed links', requeued >= 1 && (await getScanJobByUrl(URL_A)).status === 'PENDING', `requeued ${requeued}`);
+  check('the DEV retry button re-arms failed links', requeued >= 1 && (await getScanJobByUrl(URL_A)).status === 'PENDING',
+    `requeued ${requeued}${foreign.length ? ` (${foreign.length} foreign row(s) restored below)` : ''}`);
+  for (const f of foreign) {
+    await db.prepare(`UPDATE link_scan_jobs SET status = 'FAILED', attempts = ?, last_error = ?,
+      next_attempt_at = ?, claimed_by = NULL, updated_at = ? WHERE id = ?`)
+      .run(f.attempts, f.last_error, f.next_attempt_at, nowIso(), f.id);
+  }
+  if (foreign.length) console.log(`  (left ${foreign.length} unrelated FAILED row(s) exactly as found)`);
 
   await db.prepare('UPDATE link_scan_jobs SET next_attempt_at = NULL WHERE url = ?').run(URL_A);
-  const last = await claimMine('verify-process');
+  const last = await claimMine('verify-process', URL_A);
   await finishScanJob(last.id, { ok: true, fields: 9, maxAttempts: 3, attempts: last.attempts });
   await markScanJobDuration(last.id, 4321);
   const done = await getScanJobByUrl(URL_A);
@@ -164,6 +192,100 @@ async function verifyScanQueue() {
   check('...unless an explicit re-scan is asked for', (await enqueueScanJobs([URL_A], { force: true })).queued.length === 1);
   check('an unknown link has no scan state at all', (await scanStateForUrl(URL_B)) === null);
   await db.prepare('DELETE FROM link_scan_jobs WHERE url = ?').run(URL_A);
+}
+
+/* ------------- 2b. browser capability gate + scan-verdict rules ----------
+   These checks exist because of one incident class: a host that cannot open a
+   browser claimed shared-queue work anyway, and filed its own missing binary as
+   the LINK's failure (five links, "No scan output produced") and later as the
+   APPLICANT's failure (two real apply runs). A browserless host must be unable to
+   cause either again, on any machine, so the contract is asserted here rather
+   than trusted. Nothing in this section launches a browser. */
+const formFields = (n) => Array.from({ length: n }, (_, i) => ({ question: `Q${i + 1}`, kind: 'text' }));
+
+function runScanScript(url, env) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [SCAN_SCRIPT, url], {
+      cwd: path.resolve(path.dirname(SCAN_SCRIPT), '..'),
+      env: { ...process.env, ...env, AUTO_SCAN_ON_LINK: 'false' },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += String(d); });
+    child.stderr.on('data', (d) => { out += String(d); });
+    child.on('error', (err) => resolve({ code: -1, out: `${out}${err?.message || err}` }));
+    child.on('exit', (code) => resolve({ code: code ?? 1, out }));
+  });
+}
+
+async function verifyCapabilityGate() {
+  step('2b. browser capability gate + scan verdict rules');
+
+  check('a host is treated as incapable until a probe proves otherwise',
+    !canDriveBrowsers() && browserState().checked === false,
+    `state ${JSON.stringify({ ok: browserState().ok, checked: browserState().checked, host: browserState().host })}`);
+
+  // The verdict rules (pure): the shapes that used to be cached and published.
+  const goodPosting = { h1: 'Staff Data Engineer', docTitle: 'Staff Data Engineer - Acme', jobTitle: '', headingAttr: '' };
+  check('a real form is accepted', judgeScan({ posting: goodPosting, fields: formFields(12) }, URL_A).ok === true);
+  check('a scan that found nothing at all is refused', judgeScan({ posting: goodPosting, fields: [] }, URL_A).ok === false);
+  const listing = judgeScan(
+    { posting: { h1: 'Open roles', docTitle: 'Open roles - Acme', jobTitle: '', headingAttr: '' }, fields: formFields(1) },
+    'https://www.acme.com/careers/roles?ashby_jid=11111111-1111-4111-8111-111111111111');
+  check('a job LISTING is refused before anything is written',
+    !listing.ok && /not an application form|listing/i.test(listing.why || ''), listing.why);
+  const notFound = judgeScan({ posting: { h1: 'Page not found', docTitle: 'Page not found' }, fields: formFields(3) }, URL_A);
+  check('an Ashby "Page not found" is refused', !notFound.ok, notFound.why);
+  check('one field on a non-form URL is residue, one field on an /application form is not',
+    inventoryIsResidue(formFields(1), URL_A) && !inventoryIsResidue(formFields(1), `${URL_A}/application`));
+  check('every refusal carries a sentence a DEV can act on',
+    [listing, notFound].every((v) => typeof v.why === 'string' && v.why.length > 15));
+
+  // Cache-only mode: the real script, driven as a browserless host drives it.
+  const cacheOnly = await runScanScript(URL_C, { SCAN_NO_BROWSER: 'true' });
+  check('a browserless host stops before launching anything (NEEDS_BROWSER + exit 3)',
+    cacheOnly.code === 3 && /NEEDS_BROWSER/.test(cacheOnly.out), `exit ${cacheOnly.code}`);
+  check('...and never reaches the browser-launch branch', !/Launching engine in SCAN_ONLY mode/.test(cacheOnly.out));
+
+  // Defer, not fail: the row survives with its attempts intact.
+  await enqueueScanJobs([URL_C], { reason: 'verify' });
+  const jobC = await claimMine('verify-capability', URL_C);
+  check('the capability-gated link is claimable at all', jobC?.url === URL_C, `attempt ${jobC?.attempts}`);
+  const deferred = await finishScanJob(jobC.id, {
+    ok: false, defer: true, error: 'verify: host has no browser', attempts: jobC.attempts, maxAttempts: 3
+  });
+  const rowC = await getScanJobByUrl(URL_C);
+  check('a link needing a page load is DEFERRED on a browserless host', deferred === 'DEFERRED' && rowC.status === 'PENDING', deferred);
+  check('the attempt it spent is refunded', rowC.attempts === jobC.attempts - 1, `attempts ${rowC.attempts}`);
+  check('it waits for a capable host instead of hot-looping', Date.parse(rowC.next_attempt_at) > Date.now(),
+    `next ${String(rowC.next_attempt_at).slice(11, 19)}`);
+
+  await db.prepare('UPDATE link_scan_jobs SET next_attempt_at = NULL WHERE url = ?').run(URL_C);
+  const again = await claimMine('verify-capability', URL_C);
+  const doneState = await finishScanJob(again.id, { ok: true, fields: 12, via: 'shared-cache', attempts: again.attempts });
+  const doneRow = await getScanJobByUrl(URL_C);
+  check('a cache answer is recorded AS a cache answer', doneState === 'DONE' && doneRow.scan_via === 'shared-cache' && doneRow.fields === 12,
+    `via ${doneRow.scan_via}`);
+  await db.prepare("UPDATE link_scan_jobs SET status = 'RUNNING' WHERE url = ?").run(URL_C);
+  await finishScanJob(doneRow.id, { ok: false, error: 'verify: refused', attempts: 1, maxAttempts: 3 });
+  check('a failure clears the stale provenance instead of inheriting it', (await getScanJobByUrl(URL_C)).scan_via == null);
+}
+
+/* -------- 3c. a machine fault must never become an applicant's failure ------ */
+async function verifyHandBack(appId) {
+  step('3c. hand-back: no browser on a host is not a FAILED application');
+  await db.prepare("UPDATE applications SET status = 'APPLYING', fail_reason = NULL WHERE id = ?").run(appId);
+  const out = await handBackToQueue(appId, "verify: browserType.launch: Executable doesn't exist");
+  const row = await db.prepare('SELECT status, fail_reason, queued_at FROM applications WHERE id = ?').get(appId);
+  check('an APPLYING run on a browserless host returns to QUEUED', out?.status === 'QUEUED' && row.status === 'QUEUED', row.status);
+  check('the machine\'s error is not filed as the applicant\'s failure', row.fail_reason == null, String(row.fail_reason));
+  const events = await listEvents({ limit: 20, type: 'application.handback' });
+  check('the hand-back is visible in the activity feed', events.some((e) => Number(e.application_id) === Number(appId)));
+
+  await db.prepare("UPDATE applications SET status = 'SUCCESS' WHERE id = ?").run(appId);
+  const nope = await handBackToQueue(appId, 'verify: a late straggler must not re-open a submission');
+  check('a finished submission is never re-opened by a hand-back',
+    nope === null && (await db.prepare('SELECT status FROM applications WHERE id = ?').get(appId)).status === 'SUCCESS');
 }
 
 async function verifyApplicantAndPurge() {
@@ -283,16 +405,25 @@ async function verifyDevLog(appA) {
   // must find the event AND must not leak unrelated stages into the result.
   let missing = [];
   for (const t of types) {
-    const rows = await listEvents({ limit: 20, type: t });
-    if (!rows.some((r) => r.type === t)) missing.push(t);
+    // Match OUR row, not merely "a row of this type": on a shared database live
+    // CA traffic outranks a fixture inside any newest-N window.
+    const rows = await listEvents({ limit: 100, type: t });
+    if (!rows.some((r) => r.type === t && Number(r.application_id) === Number(appA))) missing.push(t);
   }
   check('every stage of the pipeline emits an event', missing.length === 0, missing.length ? `missing ${missing.join(', ')}` : `${types.length} types`);
-  const shots = await listEvents({ limit: 50, type: 'screenshots' });
-  check('the feed filters by stage (type=screenshots)', shots.length >= 1 && shots.every((e) => e.type.startsWith('screenshots')), `${shots.length} row(s)`);
+  const shots = await listEvents({ limit: 100, type: 'screenshots' });
+  check('the feed filters by stage (type=screenshots)',
+    shots.some((e) => Number(e.application_id) === Number(appA)) && shots.every((e) => e.type.startsWith('screenshots')), `${shots.length} row(s)`);
   const scan = await listEvents({ limit: 50, type: 'link_scan' });
   check('one prefix covers a whole worker (type=link_scan)', scan.length >= 2 && scan.every((e) => e.type.startsWith('link_scan')), `${scan.length} row(s)`);
-  const ctx = await listEvents({ limit: 10, type: 'ca_answers_edited' });
-  check('the feed carries the AWL-ID + link context', ctx.some((e) => e.awl_id === AWL && e.company === 'Verify Co'));
+  // Scoped to OUR application. "The newest 10 of this type" is a race with live
+  // traffic on a shared database: real CAs edit answers while this runs, and
+  // losing that race would say nothing about the contract being checked here.
+  const feed = await listEvents({ limit: 200, type: 'ca_answers_edited' });
+  const ctx = feed.filter((e) => Number(e.application_id) === Number(appA));
+  check('the feed carries the AWL-ID + link context',
+    ctx.length > 0 && ctx.every((e) => e.awl_id === AWL && e.company === 'Verify Co'),
+    ctx.length ? `${ctx.length} row(s): awl=${ctx[0].awl_id}, company=${ctx[0].company}` : 'our application produced no ca_answers_edited row in the newest 200');
 }
 
 /* --------------------- .csv / paste ingestion parser -----------------
@@ -352,7 +483,9 @@ await migrate();
 try {
   await verifySchema();
   await verifyScanQueue();
+  await verifyCapabilityGate();
   const { appA } = await verifyApplicantAndPurge();
+  await verifyHandBack(appA);
   await verifyLocationShapes();
   await verifyDevLog(appA);
   await verifyCsvParser();
@@ -361,7 +494,6 @@ try {
   failed += 1;
   console.error('\n  EXCEPTION', err);
 } finally {
-  if (returnedForeign) console.log(`  (note: ${returnedForeign} unrelated link_scan_jobs claim(s) were touched and handed back)`);
   await cleanup().catch((e) => console.error('cleanup:', e.message));
   const left = await db.prepare('SELECT COUNT(1) AS n FROM applicants WHERE awl_id = ?').get(AWL);
   check('synthetic fixture removed again', !Number(left?.n || 0));

@@ -5,7 +5,14 @@
 ### Prerequisites
 - Node.js installed (your project already has this)
 - Playwright installed (already in your package.json)
-- Sample Ashbyhq job URLs from companies you'll work with
+- **A real browser binary** — `npm install` gives Playwright the library, not the
+  browser. Run `npm run browser:install` (or `npx playwright install --with-deps
+  chromium`), or point `CHROME_PATH` at an existing Chrome. The deployed Railway
+  build does this for you; see *Deployment* at the bottom.
+- Sample Ashbyhq job URLs from companies you'll work with — the **application
+  form** URL (`jobs.ashbyhq.com/<company>/<posting-id>/application`), not a
+  company careers/listing page (`<company>.com/careers/roles?ashby_jid=…`).
+  Listing URLs are now refused rather than scanned into junk.
 
 ### Step 1: Install Dependencies (if needed)
 ```bash
@@ -166,6 +173,55 @@ Keep detailed records of your findings:
 - Success/failure patterns
 
 This documentation will be crucial for building the automation system.
+
+---
+
+## Deployment (dashboard + workers) — the browser capability gate
+
+Every host that runs `node ashbyhq-dashboard/server.js` also runs the scan and
+apply workers, and the queues live in a **shared** database, so a host that
+cannot drive a browser used to claim real work and file its own missing binary as
+other people's failures (links "No scan output produced", applicants
+"Engine process exited without a result"). That class is closed:
+
+1. **Measure, don't assume.** On boot the host launches a headless browser, opens
+   `about:blank` and remembers the verdict (`core/browser-probe.js` /
+   `core/browser-check.js`). The check mirrors the engine's own search:
+   `CHROME_PATH` → installed Chrome → Playwright's bundled Chromium.
+2. **No browser, no claiming.** The apply worker will not claim a run. The scan
+   worker may still answer from the local/shared question cache; anything that
+   needs a real page load is **deferred** (attempt refunded, retried in
+   `SCAN_DEFER_MS`, default 5 minutes) for a browser-capable host.
+   `WORKER_ENABLED=false` remains a manual opt-out, but it can only pin a host
+   **off** — it can never assert a capability the host does not have.
+3. **A machine's problem stays the machine's problem.** If a run dies on a
+   missing browser it is handed back `APPLYING → QUEUED`, the host's error is not
+   stored as the applicant's failure, and a finished submission is never reopened.
+4. **Provenance is visible.** `link_scan_jobs.scan_via` records whether a
+   `✓ scanned` came from `local-cache`, `shared-cache` or a real `browser` scan,
+   and the DEV pane shows the host's browser capability plus that tag — so an
+   8-second cache answer can't be mistaken for a page load.
+5. **Junk never lands.** A scan whose page reads like a listing/404, or that
+   returns one field on a non-`/application` URL, is refused: nothing stored,
+   nothing published to the shared cache.
+
+**Build command** (`railway.json`) is now:
+
+```bash
+npm install && npm install --prefix ashbyhq-dashboard && npm run browser:install
+```
+
+`scripts/ensure-browser.js` is idempotent and never fails the build — a host it
+cannot equip is pinned off by the gate with the reason in the DEV pane, which is
+better than a deploy that does not start. Skip it with
+`APPLYWIZZ_SKIP_BROWSER_INSTALL=true` when the image already has a browser.
+
+**Before shipping**, from the repo root:
+
+```bash
+npm run verify:flow   # 80 assertions: gate, defer/refund, hand-back, cache
+                      # provenance, junk refusal, publish path, workers
+```
 
 ---
 

@@ -120,11 +120,19 @@ export async function upsertJobLinkQuestions({ url, jobLink = null, questions } 
         `INSERT INTO ${q} (job_id, job_link, questions) VALUES ($1, $2, '[]'::jsonb)
          ON CONFLICT (job_id) DO NOTHING`, [jobId, link]);
     } else {
+      // REPLACE, do not UPDATE. This table belongs to the CRM and the client owns
+      // its triggers; one of them (BEFORE UPDATE, reading a `user_id` column this
+      // table has never had) raises `record "new" has no field "user_id"` for any
+      // UPDATE of an existing row. An upsert therefore silently failed at exactly
+      // the write that matters - turning the '[]' row created when a link was
+      // registered into the scanned inventory every later applicant reuses, so a
+      // link looked "published" forever while every install kept re-scanning it.
+      // DELETE + INSERT is the same replacement, fires only INSERT/DELETE
+      // triggers, and works whatever the CRM has bolted onto this table.
+      await pool.query(`DELETE FROM ${q} WHERE job_id = $1`, [jobId]);
       await pool.query(
-        `INSERT INTO ${q} (job_id, job_link, questions) VALUES ($1, $2, $3::jsonb)
-         ON CONFLICT (job_id) DO UPDATE SET
-           job_link = excluded.job_link,
-           questions = excluded.questions`, [jobId, link, payload]);
+        `INSERT INTO ${q} (job_id, job_link, questions) VALUES ($1, $2, $3::jsonb)`,
+        [jobId, link, payload]);
     }
     await pool.query('COMMIT');
     const row = await pool.query(`SELECT questions FROM ${q} WHERE job_id = $1`, [jobId]);

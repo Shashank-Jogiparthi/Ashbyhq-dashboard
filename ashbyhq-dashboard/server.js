@@ -51,6 +51,7 @@ import { sendAuthCode } from './core/mailer.js';
 import { parseAwlLinkTable } from './core/joblink-csv.js';
 import * as worker from './worker/runner.js';
 import { enqueueLinkScans, scanQueueState, scanStateForUrl, start as startScanWorker } from './worker/link-scanner.js';
+import { checkBrowser } from './core/browser-check.js';
 import { syncFromPostgres, syncApplicantByAwl, ingestDocument, normalizeAwlId, isConfigured as connectorConfigured } from './connector/applicant-db.js';
 import { runDraftPass, buildReviewQuestions } from './draft-service.js';
 import {
@@ -102,6 +103,12 @@ if (process.env.WORKER_ENABLED === 'true') await setSystemState('worker_enabled'
 // WORKER_ENABLED=false deliberately does NOT write here: the flag lives in a
 // shared database, so a per-host brake belongs in the worker itself (see
 // HOST_OPT_OUT in worker/runner.js), not in the row every other host reads.
+// Capability probe, fired the instant the process boots: "can this machine
+// actually launch a browser?" Both workers ask the same module, so one probe
+// answers for both. NOT awaited - a first launch can legitimately take tens of
+// seconds and the HTTP server must never wait for it; until it answers, every
+// tick simply declines to claim, which is the safe direction.
+checkBrowser().catch(() => {});              // answers on its own; see the note above
 worker.start().catch((e) => console.error('worker start:', e.message)); // poll loop always runs; it only CLAIMS when worker_enabled=true
 startScanWorker();                          // pre-scan queue: claims link_scan_jobs rows
 // Privacy sweep: the draft pass caches parsed resume text on disk. A successful

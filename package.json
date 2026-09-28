@@ -6,7 +6,9 @@
     "start": "node ashbyhq-dashboard/server.js",
     "dev": "node --watch ashbyhq-dashboard/server.js",
     "engine": "node ashby-hybrid-automation.js",
-    "postinstall": "npm install --prefix ashbyhq-dashboard"
+    "postinstall": "npm install --prefix ashbyhq-dashboard",
+    "browser:install": "node scripts/ensure-browser.js",
+    "verify:flow": "npm run --prefix ashbyhq-dashboard verify:flow"
   },
   "engines": {
     "node": ">=22.5"

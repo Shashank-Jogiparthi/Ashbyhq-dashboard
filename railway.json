@@ -7,6 +7,6 @@
   },
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "npm install && npm install --prefix ashbyhq-dashboard"
+    "buildCommand": "npm install && npm install --prefix ashbyhq-dashboard && npm run browser:install"
   }
 }

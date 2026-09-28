@@ -8,7 +8,7 @@ import { canonicalJobUrl, companyFromUrl } from '../core/job-url.js';
 export const LEGAL_TRANSITIONS = {
   ASSIGNED: ['QUEUED', 'FAILED'],            // CA APPLY / CA SKIP
   QUEUED: ['APPLYING', 'FAILED'],            // worker claim / dev force-fail
-  APPLYING: ['SUCCESS', 'PENDING', 'FAILED'],// worker outcomes
+  APPLYING: ['SUCCESS', 'PENDING', 'FAILED', 'QUEUED'],  // worker outcomes + hand-back
   PENDING: ['SUCCESS', 'FAILED'],            // dev manual resolution
   SUCCESS: [],
   FAILED: ['QUEUED', 'ASSIGNED']              // dev re-queue / worker reopen for missing-field CA input
@@ -822,10 +822,17 @@ export async function requeueStaleScanClaims(staleMs) {
 
 // Atomic-ish claim: SELECT then single-row CAS on status='PENDING'. Two servers
 // asking at once cannot both get the row, and the same SQL works on SQLite.
-export async function claimNextScanJob({ claimer, now = nowIso() } = {}) {
-  const due = await db.prepare(`SELECT * FROM link_scan_jobs
-    WHERE status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-    ORDER BY id LIMIT 1`).get(now);
+// `url` restricts the SELECT to one link. The queue is SHARED, so a caller that
+// means a specific link (the flow verifier, a DEV "scan this link now" action)
+// must not be handed an unrelated applicant's row instead; the CAS is unchanged,
+// so the single-winner property is still exactly what is being tested.
+export async function claimNextScanJob({ claimer, now = nowIso(), url = null } = {}) {
+  const due = url
+    ? await db.prepare(`SELECT * FROM link_scan_jobs WHERE status = 'PENDING' AND url = ?
+      AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY id LIMIT 1`).get(String(url), now)
+    : await db.prepare(`SELECT * FROM link_scan_jobs
+      WHERE status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+      ORDER BY id LIMIT 1`).get(now);
   if (!due) return null;
   const taken = await db.prepare(`UPDATE link_scan_jobs SET status = 'RUNNING', claimed_by = ?,
     claimed_at = ?, started_at = ?, attempts = attempts + 1, updated_at = ?
@@ -837,17 +844,31 @@ export async function claimNextScanJob({ claimer, now = nowIso() } = {}) {
 // row as PENDING until max_attempts, then it parks as FAILED for the DEV pane.
 // The elapsed time is deliberately not computed in SQL (no julianday() on
 // Postgres): the worker reports it through markScanJobDuration().
-export async function finishScanJob(id, { ok, fields = 0, error = null, maxAttempts = 3, attempts = 1 }) {
+//
+// `defer` is a third outcome, for a host that CANNOT do the work at all (no
+// browser). It is not a failure of the link: the row goes back to PENDING with
+// the attempt it just took refunded, so a container without a browser can poll
+// the same shared queue as long as it likes without grinding a good link into a
+// FAILED record.
+export async function finishScanJob(id, { ok, defer = false, fields = 0, error = null, maxAttempts = 3, attempts = 1, via = null } = {}) {
   const ts = nowIso();
   if (ok) {
-    await db.prepare(`UPDATE link_scan_jobs SET status = 'DONE', fields = ?, last_error = NULL,
+    await db.prepare(`UPDATE link_scan_jobs SET status = 'DONE', fields = ?, scan_via = ?, last_error = NULL,
       finished_at = ?, claimed_by = NULL, updated_at = ? WHERE id = ?`)
-      .run(Number(fields) || 0, ts, ts, Number(id));
+      .run(Number(fields) || 0, String(via || 'browser').slice(0, 24), ts, ts, Number(id));
     return 'DONE';
+  }
+  if (defer) {
+    const deferMs = Math.max(60_000, Number(process.env.SCAN_DEFER_MS || 5 * 60 * 1000));
+    await db.prepare(`UPDATE link_scan_jobs SET status = 'PENDING', claimed_by = NULL, attempts = ?,
+      last_error = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+      .run(Math.max(0, (Number(attempts) || 1) - 1), String(error || 'waiting for a browser-capable host').slice(0, 500),
+        new Date(Date.now() + deferMs).toISOString(), ts, Number(id));
+    return 'DEFERRED';
   }
   const permanent = attempts >= maxAttempts;
   const backoffMs = Math.min(10 * 60 * 1000, 15000 * (2 ** Math.max(0, attempts - 1)));
-  await db.prepare(`UPDATE link_scan_jobs SET status = ?, fields = 0, last_error = ?,
+  await db.prepare(`UPDATE link_scan_jobs SET status = ?, fields = 0, scan_via = NULL, last_error = ?,
     finished_at = ?, claimed_by = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
     .run(permanent ? 'FAILED' : 'PENDING', String(error || 'scan failed').slice(0, 500), ts,
       permanent ? null : new Date(Date.now() + backoffMs).toISOString(), ts, Number(id));
@@ -1190,6 +1211,30 @@ export async function markRunCrash(id, reason) {
     fail_reason: reason || 'Worker process exited abnormally',
     finished_at: nowIso()
   });
+}
+
+/**
+ * Give an application back to the queue because THIS host could not finish it,
+ * rather than blaming the applicant. Exists because a container with no browser
+ * used to claim real CA applications and mark them FAILED with
+ * "Executable doesn't exist at /root/.cache/ms-playwright/…" - a machine fault
+ * recorded as a human rejection.
+ *
+ * Only a claimed-but-unfinished row can be handed back (APPLYING), plus the
+ * damage already done this way (FAILED -> QUEUED). Anything else is left alone:
+ * a SUCCESS or a CA's own SKIP is never re-opened by a worker.
+ */
+export async function handBackToQueue(id, reason) {
+  const app = await db.prepare('SELECT status FROM applications WHERE id = ?').get(id);
+  if (!app) throw new HttpError(404, 'Application not found');
+  if (!['APPLYING', 'FAILED'].includes(app.status)) return null;
+  const out = await transition(id, 'QUEUED', 'worker', {
+    fail_reason: null,
+    finished_at: null,
+    queued_at: nowIso()
+  });
+  await logEvent(id, 'application.handback', 'worker', { from: app.status, reason: String(reason || 'host could not run a browser').slice(0, 300) });
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
