@@ -1,7 +1,7 @@
 import path from 'path';
 import express from 'express';
 import dotenv from 'dotenv';
-import { ROOT_DIR } from './db/index.js';
+import { ROOT_DIR, db } from './db/index.js';
 import { migrate } from './db/index.js';
 import {
   HttpError,
@@ -49,6 +49,8 @@ import {
 } from './db/store.js';
 import { sendAuthCode } from './core/mailer.js';
 import { parseAwlLinkTable } from './core/joblink-csv.js';
+import os from 'node:os';
+import { describeConnectorEnv } from './core/applicant-source.js';
 import * as worker from './worker/runner.js';
 import { enqueueLinkScans, scanQueueState, scanStateForUrl, start as startScanWorker } from './worker/link-scanner.js';
 import { checkBrowser } from './core/browser-check.js';
@@ -522,8 +524,14 @@ app.get('/api/dev/overview', requireAuth, requireRole('dev', 'admin'), wrap(asyn
   system: {
     workerEnabled: await getSystemState('worker_enabled') === 'true',
     worker: await worker.workerStatus(),
-    connector: connectorConfigured() ? 'Postgres configured' : 'not configured (use Ingest for a JSON export)',
-    database: 'OK (local SQLite)',
+    // Which variable NAMES arrived on THIS host, never their values. An
+    // operator cannot shell into a Railway container, so the pane has to answer
+    // "did my credentials actually reach the process" - 'not configured' with
+    // the names it looked for is a diagnosis, a bare no is not.
+    connector: describeConnectorEnv().summary,
+    connectorPresent: describeConnectorEnv().present,
+    connectorLooksFor: describeConnectorEnv().names,
+    database: `OK (${db.backend === 'supabase' ? 'Supabase Postgres (shared)' : 'local SQLite'}) - host ${os.hostname()}`,
     api: 'OK'
   },
   queued: (await getApplications({ role: 'dev' })).filter((a) => ['QUEUED', 'APPLYING', 'PENDING'].includes(a.status))
@@ -570,7 +578,7 @@ app.post('/api/dev/worker', requireAuth, requireRole('dev', 'admin'), wrap(async
 
 // Pull applicants + (AWL-ID -> link) pairs from the configured Postgres DB.
 app.post('/api/dev/sync', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => {
-  if (!connectorConfigured()) throw new HttpError(400, 'Postgres not configured. Set PG_* env, or use Ingest to load a JSON export.');
+  if (!connectorConfigured()) throw new HttpError(400, `Postgres not configured on this host. ${describeConnectorEnv().summary}. Or use Ingest to load a JSON export.`);
   const sync = await syncFromPostgres({ opsId: req.body.opsId || null });
   // A sync can bring in links nobody has scanned yet — same rule as ingestion:
   // every assigned link must end up with a cached question inventory.
@@ -586,7 +594,7 @@ app.post('/api/dev/ingest', requireAuth, requireRole('dev', 'admin'), wrap(async
 // Refresh (or create) a single applicant straight from the CRM tables by
 // AWL-ID — the one key that resolves every detail of any applicant.
 app.post('/api/dev/sync-one', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => {
-  if (!connectorConfigured()) throw new HttpError(400, 'Postgres not configured. Set PG_* env.');
+  if (!connectorConfigured()) throw new HttpError(400, `Postgres not configured on this host. ${describeConnectorEnv().summary}.`);
   const awlId = String(req.body.awlId || req.body.awl_id || '').trim();
   if (!awlId) throw new HttpError(400, 'awlId is required');
   const sync = await syncApplicantByAwl(awlId, { opsId: req.body.opsId || null });

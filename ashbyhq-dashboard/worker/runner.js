@@ -227,7 +227,17 @@ async function launch(app) {
     fs.writeFileSync(answersFile, JSON.stringify(answers), 'utf8');
   } catch { /* non-fatal: engine falls back to live matching */ }
 
-  await logEvent(app.id, 'run_started', 'worker', { run_id: runId, url: app.url });
+  // Every run announces WHO is running it and WHAT that host can see, in its
+  // first event. The AWL-25663 and no_postgres incidents were both reconstructed
+  // afterwards from which events were ABSENT - a host id and a connector flag on
+  // the line that starts the run makes 'which machine did this' a lookup.
+  await logEvent(app.id, 'run_started', 'worker', {
+    run_id: runId,
+    url: app.url,
+    host: browserState('apply').host,
+    crm_connector: snapshot.configured,
+    has_resume: Boolean(String(app.resume_address || '').trim())
+  });
 
   // The engine writes its own fatal error to stderr and nothing else survives
   // the run directory, so keep a bounded echo of it here. It is the only way to

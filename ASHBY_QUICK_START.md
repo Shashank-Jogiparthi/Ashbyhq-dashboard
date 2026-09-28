@@ -241,6 +241,31 @@ other people's failures (links "No scan output produced", applicants
    **never** auto-retried: a second attempt from the same IP is the same answer with a
    worse reputation. A page the reader cannot recognise still says "unclear", because
    guessing a submission worked is worse than admitting we cannot read it.
+9. **A host that cannot read the CRM never blames the applicant for it.** The CRM
+   connector (`PGHOST`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`) is a **per-host** setting —
+   it is not carried by the shared database. On a host without it, an incoming AWL-ID
+   becomes a nameless placeholder (empty email/phone/resume) because the lookup is
+   never attempted, and the apply then dies saying "Resume unavailable: no resume
+   address" even though `public.client_profiles` has the whole person, resume link
+   included. That is what happened to AWL-25663 on Railway. `core/applicant-source.js`
+   now splits that one message into its four real owners — *no connector here*,
+   *the CRM read failed*, *no row for this AWL-ID*, *row exists but has no resume* —
+   and the first two are host faults: the application is handed back to the queue for a
+   capable host (`run_deferred_no_crm`) instead of being recorded as the applicant's
+   FAILED. Ingest also logs `connector_configured` with every placeholder and the dashboard
+   shouts **"THIS HOST HAS NO CRM CONNECTOR"** instead of a quiet "created", so the
+   misconfiguration is visible the moment it costs you an applicant.
+   **Set the PG variables on every host that ingests or applies** — and note which
+   names count, because there is now exactly one list (`core/applicant-source.js`,
+   read by the pool builder itself): `PGHOST` (+`PGUSER`/`PGPASSWORD`/`PGDATABASE`)
+   **or one CRM-named URL** — `PG_CONNECTION_STRING`, `AZURE_PG_URL`, `AZURE_DB_URL`,
+   `CRM_DB_URL`, `CRM_DATABASE_URL`. `DATABASE_URL`/`POSTGRES_URL` are deliberately
+   **not** read: on Railway/Supabase those are the *platform's own* database, and
+   pointing the CRM there fails with `relation "client_profiles" does not exist`
+   while looking configured. The DEV → *Applicant DB connector* card prints the
+   answering host, the names it looks for and the ones that actually arrived
+   (names only, never values) — check that page instead of guessing whether your
+   variables reached the container.
 
 **So where do applies run?** On any host that can launch a browser. Your own
 machine opens a real window (`npm start`, worker enabled); a Railway container
@@ -275,8 +300,9 @@ better than a deploy that does not start. Skip it with
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 122 assertions: gate per mode, defer/refund, hand-back +
-                      # park, cache provenance, junk refusal, publish path, workers
+npm run verify:flow   # 134 assertions: gate per mode, defer/refund, hand-back +
+                      # park, cache provenance, junk refusal, publish path, workers,
+                      # resume-source attribution, one CRM name list
 ```
 
 ---

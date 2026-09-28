@@ -66,7 +66,7 @@ const only = onlyIdx >= 0 ? String(args[onlyIdx + 1] || '').replace(/^public\./,
 
 const cfg = pgConfig();
 if (!cfg) {
-  console.error('Azure CRM is not configured — set PGHOST / PGUSER / PGPASSWORD / PGDATABASE in the repo-root .env');
+  console.error('Azure CRM is not configured — set PGHOST / PGUSER / PGPASSWORD / PGDATABASE in the repo-root .env, or one CRM-named URL (PG_CONNECTION_STRING / AZURE_PG_URL / CRM_DB_URL). DATABASE_URL is the platform\'s own DB and is not read.');
   process.exit(1);
 }
 

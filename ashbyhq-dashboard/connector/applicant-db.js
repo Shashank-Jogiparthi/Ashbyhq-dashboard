@@ -34,7 +34,7 @@ import {
   findStaffByExtId,
   logEvent
 } from '../db/store.js';
-import { getPg, pgConfig } from './azure-config.js';
+import { getPg, pgConfig, CRM_HOST_NAMES, CRM_URL_NAMES } from './azure-config.js';
 import { listAwlJobLinks, ensureAwlLinksTable } from './awl-links.js';
 import { upsertJobLinkQuestions, ensureQuestionsTable } from './joblink-questions.js';
 
@@ -202,7 +202,13 @@ async function upsertCombined(prof, info, { opsId, summary }) {
 // applywizz_id, and stream every applicant into the local store.
 export async function syncFromPostgres({ opsId = null, awlId = null } = {}) {
   const cfg = pgConfig();
-  if (!cfg) throw new Error('Postgres is not configured (set PGHOST / PGUSER / PGPASSWORD / PGDATABASE or PG_CONNECTION_STRING).');
+  // This used to promise PG_CONNECTION_STRING alone would work while pgConfig()
+  // returned null without a PGHOST - a host that set only a URL was told it was
+  // unconfigured by one module and configured by another. The name list now
+  // comes from core/applicant-source.js and both sides read the same one.
+  if (!cfg) {
+    throw new Error(`Postgres is not configured on this host. Set ${CRM_HOST_NAMES.join(' (+PGUSER/PGPASSWORD/PGDATABASE)')} or one of ${CRM_URL_NAMES.join(', ')} - not DATABASE_URL, which is the platform's own DB.`);
+  }
   const pg = await getPg();
   const pool = new pg.Pool(cfg);
   try {

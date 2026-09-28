@@ -882,6 +882,100 @@ v3.3d - WHAT ASHBY ACTUALLY SAID (core/submission-banner.js)
   not, and the comment says what that is for: memory and shape, not
   deliverability. No amount of spacing makes a datacenter IP look residential.
 
+v3.4 - "THE CRM HAS HER, THIS HOST CANNOT SEE HER" (core/applicant-source.js)
+  AWL-25663 is the proof that 'Resume unavailable: no resume address' was a lie.
+  The operator ran `SELECT * FROM public.client_profiles WHERE applywizz_id =
+  'AWL-25663'` and got a full row: 50 of 62 columns populated, resume_url a
+  109-character link, and clients_additional_info carrying her name. The
+  platform still filed her as a nameless applicant (full_name = the AWL-ID,
+  email '', phone '', resume_address '', profile_json '{}') and the mdCalc run
+  died on the empty resume. The fetch code was never the problem:
+   - the ingest that created her logged applicant_placeholder_created with NO
+     applicant_profile_fetched / _fetch_failed event beside it, because
+     server.js only attempts the CRM read when pgConfig() resolves - and
+     pgConfig() returns null without PGHOST. Railway has never had the
+     Postgres credentials set, which is the same reason crm_writeback kept
+     logging {skipped:'no_postgres'}.
+   - the apply worker then found profile_json '{}' and called
+     ensureApplicantSnapshot(), which returns immediately when
+     connector.isConfigured() is false. No refetch event was logged on run
+     1790592336715-101 for exactly that reason.
+  So one host that cannot read the CRM did two things badly: it stored a
+  placeholder as if the person did not exist, and then blamed the missing
+  resume on her. Both are now rules, not settings:
+   - core/applicant-source.js classifyMissingResume() splits 'no resume
+     address' into its four owners - no connector on this host, the CRM read
+     itself failed, no client_profiles row at all, and a row that genuinely
+     has no resume. The first two are HOST FAULTS: the application is handed
+     back to the queue (run_deferred_no_crm) for a host that can read the CRM
+     instead of being marked FAILED against the applicant. The last two stay
+     the applicant's failure, but say which one it is, in one sentence a CA
+     can act on.
+   - worker/runner.js ensureApplicantSnapshot() returns what it learned
+     ({configured, seen, error}) instead of a bare boolean that threw the
+     knowledge away, and the resume-failure path finally calls cleanupRun():
+     every one of those failures had left the applicant's profile.json on
+     disk in the run directory.
+   - server.js records connector_configured on the placeholder event and
+     returns connector in the ingest response; public/js/app.js turns a
+     placeholder created on a connector-less host into a loud 'THIS HOST HAS
+     NO CRM CONNECTOR' warning rather than a quiet 'created'. An operator can
+     now see the misconfiguration at the moment it costs them an applicant.
+  Data healed through the platform's own path, not by hand: syncApplicantByAwl
+  ('AWL-25663') -> {seen:1, updated:1} -> real name/email/phone, resume set
+  (109 chars, http), 34-column raw profile. Run #101 was deliberately left
+  FAILED - the CA's APPLY click is the consent, so one Retry click re-queues it
+  rather than the platform re-applying on its own.
+  Residual, stated: the fix makes a connector-less host honest, not capable.
+  Railway still needs PGHOST/PGUSER/PGPASSWORD/PGDATABASE to ingest or apply
+  for anybody whose profile is not already in the shared DB.
+
+v3.4a - WHICH VARIABLE NAME COUNTS AS A CRM CONNECTOR (one list)
+  The operator had in fact given Railway database credentials, which made the
+  sentence above wrong as written - so the question became which name the code
+  accepts. It accepted exactly two: pgConfig() in connector/azure-config.js
+  checked PGHOST || AZURE_PG_HOST and returned null otherwise, while
+  connector/applicant-db.js's own error message promised that
+  PG_CONNECTION_STRING alone would do, and the v3.4 classifier (written from
+  that message) agreed with the message rather than the pool builder. A host
+  handed ONE connection URL - which is what a managed-Postgres dashboard
+  generates, Railway included - was therefore 'configured' in two places and
+  unable to connect in the third, and every symptom downstream looked like a
+  missing applicant.
+  Now the list exists once, in core/applicant-source.js:
+   - CRM_HOST_NAMES (PGHOST, AZURE_PG_HOST) and CRM_URL_NAMES
+     (PG_CONNECTION_STRING, AZURE_PG_URL, AZURE_DB_URL, CRM_DB_URL,
+     CRM_DATABASE_URL). azure-config.js imports both and builds the pool from
+     them: a URL-only host gets {connectionString, ssl} with NO empty host/user
+     keys, because pg lets explicit config override the values parsed out of
+     the URL, and `host: ''` would have silently wrecked a working string.
+   - DATABASE_URL / POSTGRES_URL are deliberately NOT accepted. On Railway and
+     Supabase those names are the PLATFORM's own database; reading
+     client_profiles from them fails with 'relation does not exist' while
+     pretending the CRM was reachable. verify:flow asserts they stay out.
+   - describeConnectorEnv() reports which names ARRIVED on a host, names only.
+     The DEV 'Applicant DB connector' card now shows the answering host, the
+     names it looks for, the ones it got, and a red warning when it got none -
+     because an operator cannot shell into a container to check.
+     server.js also stopped claiming 'OK (local SQLite)' unconditionally: it
+     reports the real backend and hostname.
+   - worker/runner.js run_started now carries host + crm_connector +
+     has_resume. Both of this session's incidents (the AWL-25663 placeholder and
+     the 09:59 no_postgres writeback) had to be reconstructed from which events
+     were ABSENT; a run should say who ran it and what that machine could see in
+     its first line, not its last.
+  Proof the heal did land, through the join the worker actually uses
+  (claimForRun selects ap.resume_address from the JOINED applicants table -
+  applications has no name/resume columns at all, which is why a probe against
+  applications alone looks unfixed): applicants AWL-25663 = name 20 chars, email
+  25, phone 12, resume 109 (https), profile 8284; application #101 via
+  APP_SELECT = name 20, resume 109, profile 8284. It still reads FAILED because
+  nobody re-queued it, not because the data is missing.
+  Still open, and it is the operator's to close: whether Railway's variables
+  arrive under names the code can now read. The DEV pane on the hosted URL
+  answers that in one look - if it lists nothing, the variables are on a
+  different service (or named DATABASE_URL) rather than missing.
+
 PROVENANCE + JUNK REFUSAL
   link_scan_jobs.scan_via (local-cache | shared-cache | browser,
   NULL on failure) makes an 8s "✓ scanned" legible as a cache answer
@@ -920,7 +1014,7 @@ BUILD-TIME BROWSER (scripts/ensure-browser.js, repo root)
   APPLYWIZZ_SKIP_BROWSER_INSTALL=true. It is deliberately not in
   postinstall, so a local npm install never pulls ~150MB unasked.
 
-VERIFICATION (npm run verify:flow, now 122 assertions)
+VERIFICATION (npm run verify:flow, now 134 assertions)
   new verifyCapabilityGate() (fail-closed default, verdict rules, a
   REAL cache-only scan-link.js spawn with SCAN_NO_BROWSER=true that
   must exit 3 without launching, the defer/attempt-refund/
@@ -948,7 +1042,19 @@ VERIFICATION (npm run verify:flow, now 122 assertions)
   bounded so a whole page cannot be pasted into a reason, and silent on a page
   it cannot read), that the worker consults it before calling a run unclear,
   that a PENDING row keeps its reason, and that starts are staggered whether or
-  not a cap exists. Verifier hygiene on a shared DB learned the hard
+  not a cap exists. v3.4 asserts the resume classifier as a four-way truth table
+  (no connector, failed read, absent row, row without a resume), that the two
+  host-fault answers are the only ones that hand back, that
+  ensureApplicantSnapshot reports what it learned instead of swallowing it, that
+  the resume-failure path cleans its run directory, and that the ingest records
+  connector_configured so a placeholder can be traced to the host that could not
+  look. v3.4a asserts that ONE name list drives both the classifier and the pool
+  builder (a URL-only host is configured in both, pgConfig() returns a
+  connectionString with no empty host key to override it, DATABASE_URL counts
+  nowhere), that the connector module imports the shared list with no
+  hand-rolled PGHOST chain left, that the operator-facing summary names the
+  variables without ever naming a value, and that run_started carries host +
+  crm_connector + has_resume. Verifier hygiene on a shared DB learned the hard
   way: claim BY URL (claimNextScanJob({claimer, now, url}) - a
   generic "next due row" claim re-armed other people's work),
   snapshot/restore foreign FAILED rows around the global requeue
@@ -982,6 +1088,13 @@ RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      is the same answer plus a worse reputation. Where deliverability matters
      more than throughput, run applies from a residential host
      (WORKER_ENABLED=false on the container) - see v3.3d.
+     A CRM connector is per-host, not shared: PGHOST/PGUSER/PGPASSWORD/
+     PGDATABASE (or ONE CRM-named URL: PG_CONNECTION_STRING, AZURE_PG_URL,
+     AZURE_DB_URL, CRM_DB_URL, CRM_DATABASE_URL) must be set on EVERY host that
+     ingests or applies. A host without them can serve cache data but cannot
+     look a client up, so it must never be the one that decides an applicant
+     'has no resume'. DATABASE_URL/POSTGRES_URL do not count - they are the
+     platform's own database, and the CRM tables are not in them.
 
-END OF CURRENT-STATE DOC (v3.3d) - previous v2 plan superseded; base
+END OF CURRENT-STATE DOC (v3.4a) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

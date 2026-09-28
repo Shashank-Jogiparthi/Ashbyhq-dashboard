@@ -895,11 +895,22 @@ async function renderDevDataSync() {
   ]);
   const opsStaff = data.staff.filter((s) => s.role === 'ops');
   const ws = data.system.worker || {};
+  // A CRM connector belongs to the machine that runs the code, not to the shared
+  // database, so this card has to say which host is answering and which of the
+  // accepted variable names it actually received (names only, never values) -
+  // otherwise "not configured" looks like a mystery instead of a missing variable.
+  const crmNames = (data.system.connectorPresent || []).join(', ') || 'none';
+  const crmMissing = !(data.system.connectorPresent || []).length;
   $('view').innerHTML = `
     <div class="card" style="margin-bottom:14px;">
       <b>Applicant DB connector</b>
-      <p class="muted">${esc(data.system.connector)}. Configure PG_* env vars (Azure Postgres) then pull
-        AWL-ID applicants into the local store. Resumes are never stored — only the S3 address.
+      <p class="${crmMissing ? '' : 'muted'}" style="${crmMissing ? 'color:var(--coral)' : ''}">
+        <b>${esc(data.system.connector)}</b><br>
+        Host <span class="mono">${esc(data.system.database || '')}</span> · accepted variables seen: <span class="mono">${esc(crmNames)}</span><br>
+        Set <span class="mono">${esc((data.system.connectorLooksFor || []).join(' '))}</span> on THIS service (one URL is enough).
+        ${crmMissing ? '<b>Until then this host cannot read client_profiles: anything it ingests becomes a nameless placeholder and any apply fails for want of a resume.</b>' : ''}
+      </p>
+      <p class="muted">Then pull AWL-ID applicants into the local store. Resumes are never stored — only the S3 address.
         Job links are read from <span class="mono">ashby_joblinks</span> on every sync; the box below is the write side.</p>
       <div class="actions">
         <button class="primary" id="btn-pg-sync">⇅ Sync applicants from Postgres</button>
@@ -1075,7 +1086,7 @@ async function ingestLinkText(text, status) {
       // is no later sync to wait for, and a run here can never find a resume.
       ? `<br><b>${uniqPh.length} AWL-ID(s) were created as placeholders and THIS HOST HAS NO CRM CONNECTOR</b> ${ids} `
         + `— it cannot read client_profiles at all, so they will stay nameless here and any apply will fail for want of a resume. `
-        + `Set PGHOST/PGUSER/PGPASSWORD/PGDATABASE on this service, or ingest and run them from a host that has them.`
+        + `Set PGHOST/PGUSER/PGPASSWORD/PGDATABASE (or one CRM-named URL such as PG_CONNECTION_STRING) on this service, or ingest and run them from a host that has them.`
       : `<br><b>${uniqPh.length} AWL-ID(s) had no CRM record, so a placeholder applicant was created</b> ${ids} `
         + `— they will pick up their real details on the next sync, and until then the review pane asks the CA everything.`);
   }

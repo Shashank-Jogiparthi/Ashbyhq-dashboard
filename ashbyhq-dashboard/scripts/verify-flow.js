@@ -29,6 +29,9 @@
         into its three possible owners - a host with no CRM connector, an AWL-ID
         the CRM does not know, or a CRM row with no link in it - so the machine
         that could not look is never blamed on the person (core/applicant-source.js).
+        The connector's accepted variable names live in that one module and
+        pgConfig() builds its pool from the same list, so a host given a single
+        connection URL is configured everywhere or nowhere.
      2. an applicant is addressable by AWL-ID alone (profile present /
         needs a fetch);
      3. the post-SUCCESS privacy erase removes the form data and keeps
@@ -60,7 +63,8 @@ import { applyLaunchMode } from '../core/apply-mode.js';
 import { hostMemory, browserCapacity, effectiveLimit } from '../core/host-capacity.js';
 import { classifyRunFault } from '../core/host-fault.js';
 import { readUnknownBanner } from '../core/submission-banner.js';
-import { classifyMissingResume, noConnectorHere } from '../core/applicant-source.js';
+import { classifyMissingResume, noConnectorHere, describeConnectorEnv, CRM_HOST_NAMES, CRM_URL_NAMES } from '../core/applicant-source.js';
+import { pgConfig } from '../connector/azure-config.js';
 import { judgeScan, inventoryIsResidue } from '../core/scan-verdict.js';
 import { buildReviewQuestions, questionIsOptional } from '../draft-service.js';
 import { fieldKeyOf } from '../../field-applier.js';
@@ -78,6 +82,7 @@ const PROBE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..
 const RUNNER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'runner.js');
 const STORE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'db', 'store.js');
 const SERVER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.js');
+const CRM_CONFIG_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'connector', 'azure-config.js');
 function runScanScript(url, env) {
   return runChild(SCAN_SCRIPT, [url], env);
 }
@@ -431,6 +436,39 @@ async function verifyCapabilityGate() {
     noConnectorHere({}) === true && noConnectorHere({ PGHOST: 'h' }) === false
     && noConnectorHere({ AZURE_PG_HOST: 'h' }) === false
     && noConnectorHere({ PG_CONNECTION_STRING: 'postgres://x' }) === false);
+  // The name list used to live twice: pgConfig() refused to build a pool without
+  // a PGHOST while its own module's error message promised PG_CONNECTION_STRING
+  // would do, and a classifier written from that message disagreed with the code
+  // that opens the socket. A host handed ONE URL - which is exactly what a
+  // managed-Postgres dashboard generates - was silently not configured.
+  check('a single CRM connection URL IS a connector, and pgConfig() opens a pool from it',
+    noConnectorHere({ PG_CONNECTION_STRING: 'postgres://u:p@h:5432/db' }) === false
+    && (() => {
+      const saved = { ...process.env };
+      try {
+        for (const n of [...CRM_HOST_NAMES, ...CRM_URL_NAMES]) delete process.env[n];
+        process.env.PG_CONNECTION_STRING = 'postgres://u:p@h:5432/db';
+        const cfg = pgConfig();
+        return Boolean(cfg) && cfg.connectionString === 'postgres://u:p@h:5432/db'
+          && cfg.host === undefined;           // an empty host would override the URL
+      } finally {
+        for (const n of [...CRM_HOST_NAMES, ...CRM_URL_NAMES]) delete process.env[n];
+        Object.assign(process.env, saved);
+      }
+    })());
+  check('the platform\'s own DATABASE_URL is never mistaken for the CRM',
+    noConnectorHere({ DATABASE_URL: 'postgres://railway/internal', POSTGRES_URL: 'postgres://x' }) === true
+    && !CRM_URL_NAMES.includes('DATABASE_URL') && !CRM_URL_NAMES.includes('POSTGRES_URL'));
+  check('the connector reads the shared name list instead of re-deriving it',
+    /from '\.\.\/core\/applicant-source\.js'/.test(fs.readFileSync(CRM_CONFIG_SCRIPT, 'utf8'))
+    && !/process\.env\.PGHOST\s*\|\|/.test(fs.readFileSync(CRM_CONFIG_SCRIPT, 'utf8')));
+  check('an operator can see which names reached a host they cannot shell into, without seeing a value',
+    describeConnectorEnv({}).summary.includes('NO CRM connector')
+    && describeConnectorEnv({ PGHOST: 'secret-host' }).present.join() === 'PGHOST'
+    && !describeConnectorEnv({ PGHOST: 'secret-host', PGPASSWORD: 'hunter2' }).summary.includes('secret-host')
+    && !JSON.stringify(describeConnectorEnv({ PGHOST: 'secret-host' })).includes('hunter2'));
+  check('a run states which machine took it and what that machine could read',
+    /run_started[\s\S]{0,220}host: browserState\('apply'\)\.host[\s\S]{0,120}crm_connector: snapshot\.configured/.test(runnerSrc));
   check('the worker asks that classifier instead of blaming the applicant, and erases the run dir it left',
     /classifyMissingResume\(\{/.test(runnerSrc) && /run_deferred_no_crm/.test(runnerSrc)
       && /cleanupRun\(runDir\);\s*\n\s*return;/.test(runnerSrc));
