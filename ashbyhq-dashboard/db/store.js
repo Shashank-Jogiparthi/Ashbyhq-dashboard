@@ -25,6 +25,12 @@ export class HttpError extends Error {
   }
 }
 
+// How long a handed-back application waits before any host may claim it again.
+// Same idea as the scan worker's SCAN_DEFER_MS (a row is DEFERRED, its attempt
+// refunded, and a capable host picks it up), applied to apply runs so a machine
+// fault costs a pause instead of an endless claim/launch/fail loop.
+const APPLY_DEFER_MS = Math.max(0, Number(process.env.APPLY_DEFER_MS || 5 * 60 * 1000));
+
 /* ------------------------------------------------------------------ */
 /* EVENTS                                                              */
 /* ------------------------------------------------------------------ */
@@ -402,7 +408,11 @@ export async function applyApplication(id, actor) {
   const app = await db.prepare('SELECT * FROM applications WHERE id = ?').get(id);
   if (!app) throw new HttpError(404, 'Application not found');
   assertCanDecide(app, actor);
-  await transition(id, 'QUEUED', actor.uuid, { queued_at: nowIso(), decision_by: actor.uuid, decision_at: nowIso() });
+  // next_attempt_at = null: a CA just clicked APPLY, so this row is due this
+  // second, whatever backoff an earlier machine fault left on it.
+  await transition(id, 'QUEUED', actor.uuid, {
+    queued_at: nowIso(), next_attempt_at: null, decision_by: actor.uuid, decision_at: nowIso()
+  });
   return getApplicationById(id);
 }
 
@@ -1164,11 +1174,17 @@ export async function upsertExternalApplicant({ awlId, fullName, email, phone, r
 /* WORKER SUPPORT (parallel runner reads these)                        */
 /* ------------------------------------------------------------------ */
 
-export async function listQueuedForWorker() {
+export async function listQueuedForWorker({ now = nowIso() } = {}) {
   // Worker-only projection: includes ap.profile_json so the runner can hand
   // the full applicant record (answers + raw DB/JSON doc) to the child
   // process via PERSON_PROFILE_PATH. The shared APP_SELECT omits it to keep
   // the big blob out of the dashboard API responses.
+  //
+  // next_attempt_at is the hand-back backoff. Without it, a QUEUED row that a
+  // host keeps failing to launch (no browser, no display) is re-claimed every
+  // poll tick - seconds apart on the same dead host - which buries the event
+  // feed and burns `attempts` on a machine fault instead of waiting for a host
+  // that can run it. NULL means "due", so a fresh APPLY is never delayed.
   return db.prepare(`
     SELECT a.*, jl.company, jl.title, jl.url, jl.link_status,
            ap.full_name, ap.email AS applicant_email, ap.resume_address,
@@ -1178,16 +1194,18 @@ export async function listQueuedForWorker() {
     JOIN job_links jl ON jl.id = a.link_id
     JOIN applicants ap ON ap.awl_id = a.awl_id
     LEFT JOIN staff s ON s.uuid = a.ca_id
-    WHERE a.status = 'QUEUED' ORDER BY a.queued_at ASC
-  `).all();
+    WHERE a.status = 'QUEUED' AND (a.next_attempt_at IS NULL OR a.next_attempt_at <= ?)
+    ORDER BY a.queued_at ASC
+  `).all(now);
 }
 
 export async function claimForRun(id, runId) {
   // Atomic claim: the status guard lives in the UPDATE itself, so two workers
   // can never both win the same application once the store is shared.
   const won = await db.prepare(`UPDATE applications SET status = 'APPLYING', run_id = ?, attempts = attempts + 1,
-              updated_at = ? WHERE id = ? AND status = 'QUEUED' RETURNING id`)
-    .get(runId, nowIso(), id);
+              updated_at = ? WHERE id = ? AND status = 'QUEUED'
+              AND (next_attempt_at IS NULL OR next_attempt_at <= ?) RETURNING id`)
+    .get(runId, nowIso(), id, nowIso());
   if (!won) return null; // lost the race / not queued
   await logEvent(id, 'application.applying', 'worker', { run_id: runId, from: 'QUEUED' });
   return getApplicationById(id);
@@ -1223,17 +1241,30 @@ export async function markRunCrash(id, reason) {
  * Only a claimed-but-unfinished row can be handed back (APPLYING), plus the
  * damage already done this way (FAILED -> QUEUED). Anything else is left alone:
  * a SUCCESS or a CA's own SKIP is never re-opened by a worker.
+ *
+ * The row is parked until `APPLY_DEFER_MS`, not left immediately due. A host
+ * that cannot launch will fail it again on the very next poll tick, and with no
+ * brake that is one claim + one launch + one event every few seconds, forever:
+ * Railway ran the same two applications 25+ times in four minutes before this
+ * delay existed. The backoff is what turns "wrong host grabbed the row" into a
+ * quiet wait for a host that can run it.
  */
-export async function handBackToQueue(id, reason) {
+export async function handBackToQueue(id, reason, { deferMs = APPLY_DEFER_MS } = {}) {
   const app = await db.prepare('SELECT status FROM applications WHERE id = ?').get(id);
   if (!app) throw new HttpError(404, 'Application not found');
   if (!['APPLYING', 'FAILED'].includes(app.status)) return null;
+  const due = Number(deferMs) > 0 ? new Date(Date.now() + Number(deferMs)).toISOString() : nowIso();
   const out = await transition(id, 'QUEUED', 'worker', {
     fail_reason: null,
     finished_at: null,
-    queued_at: nowIso()
+    queued_at: nowIso(),
+    next_attempt_at: due
   });
-  await logEvent(id, 'application.handback', 'worker', { from: app.status, reason: String(reason || 'host could not run a browser').slice(0, 300) });
+  await logEvent(id, 'application.handback', 'worker', {
+    from: app.status,
+    retry_at: due,
+    reason: String(reason || 'host could not run a browser').slice(0, 300)
+  });
   return out;
 }
 
@@ -1274,8 +1305,10 @@ export async function devRequeue(id, actor) {
     throw new HttpError(400, `Cannot re-queue from ${app.status}`);
   }
   if (app.status === 'FAILED') {
+    // A DEV pressing Retry means "try it now", so the hand-back backoff is
+    // cleared as well as the failure.
     return transition(id, 'QUEUED', actor, {
-      fail_reason: null, skip_reason: null, queued_at: nowIso(), attempts: app.attempts
+      fail_reason: null, skip_reason: null, queued_at: nowIso(), next_attempt_at: null, attempts: app.attempts
     });
   }
   return getApplicationById(id);

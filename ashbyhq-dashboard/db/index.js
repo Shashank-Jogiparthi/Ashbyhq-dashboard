@@ -265,6 +265,9 @@ export async function migrate() {
   ensureColumnSqlite('applications', 'screenshots_json', 'TEXT');
   ensureColumnSqlite('applications', 'purged_at', 'TEXT');
   ensureColumnSqlite('link_scan_jobs', 'scan_via', 'TEXT');
+  // Hand-back backoff: a QUEUED application a host cannot launch is parked until
+  // this timestamp instead of being re-claimed on every poll tick.
+  ensureColumnSqlite('applications', 'next_attempt_at', 'TEXT');
   migrateCamToOpsSqlite(s);
   console.log(`Database ready: ${path.join(DATA_DIR, 'app.db')}`);
 }
@@ -297,6 +300,7 @@ async function ensureScreenshotColumnsPostgres() {
   // How a scan row was answered: browser (real work) or a cache tier. A ~8s
   // "scanned" row means nothing unless the reader can tell which it was.
   await p.query('ALTER TABLE link_scan_jobs ADD COLUMN IF NOT EXISTS scan_via TEXT');
+  await p.query('ALTER TABLE applications ADD COLUMN IF NOT EXISTS next_attempt_at TEXT');
 }
 
 async function migrateCamToOpsPostgres() {

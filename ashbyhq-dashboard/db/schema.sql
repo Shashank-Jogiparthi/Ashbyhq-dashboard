@@ -92,6 +92,10 @@ CREATE TABLE IF NOT EXISTS applications (
   decision_by TEXT,
   decision_at TEXT,
   queued_at TEXT,
+  -- Hand-back backoff. A QUEUED row whose host could not launch a browser is
+  -- parked until this time so the same machine fault cannot be re-claimed every
+  -- poll tick. NULL = due now (a fresh CA APPLY is never delayed).
+  next_attempt_at TEXT,
   finished_at TEXT,
   purged_at TEXT,                          -- when post-SUCCESS form data was erased
   created_at TEXT NOT NULL,

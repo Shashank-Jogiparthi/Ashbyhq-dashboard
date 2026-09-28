@@ -71,7 +71,10 @@ let pollTimer = null;
 let started = false;
 
 export async function workerStatus() {
-  const browser = browserState();
+  // Mode 'apply': the engine opens a HEADED window here unless APPLY_HEADLESS,
+  // so this verdict means "can this host show a real browser window", which is a
+  // different question from the scanner's headless one and gets its own answer.
+  const browser = browserState('apply');
   return {
     started,
     active: active.size,
@@ -81,7 +84,7 @@ export async function workerStatus() {
     engine: fs.existsSync(ENGINE_PATH) ? ENGINE_PATH : 'MISSING',
     hostEnabled: !HOST_OPT_OUT,
     // Surfaced so a DEV can see WHY a queue is not moving instead of guessing.
-    browser: { ok: browser.ok, host: browser.host, note: browser.note, exec: browser.exec, checked: browser.checked },
+    browser: { ok: browser.ok, host: browser.host, note: browser.note, exec: browser.exec, checked: browser.checked, mode: 'apply', headless: HEADLESS_APPLY },
     canClaim: !HOST_OPT_OUT && browser.ok,
     enabled: !HOST_OPT_OUT && browser.ok && await getSystemState('worker_enabled') === 'true'
   };
@@ -95,7 +98,7 @@ export async function start() {
   console.log(`Worker started (${Number.isFinite(MAX_CONCURRENT) ? `max ${MAX_CONCURRENT}` : 'unlimited'} concurrent browsers, `
     + `headless ${HEADLESS_APPLY ? 'on' : 'off (visible windows)'}${START_SPACING_MS ? `, starts spaced ${START_SPACING_MS}ms` : ''}, poll ${POLL_MS}ms).`);
   if (HOST_OPT_OUT) console.log('Worker idle: WORKER_ENABLED=false for this host (shared queue untouched).');
-  else if (!browserState().ok) checkBrowser().catch(() => {});   // answers on its own
+  else if (!browserState('apply').ok) checkBrowser({ mode: 'apply' }).catch(() => {});   // answers on its own
   tick();
   return workerStatus();
 }
@@ -118,12 +121,13 @@ async function tick() {
   // checkBrowser() on its own cadence, so installing a browser starts the
   // queue moving again without a redeploy - and the same rule holds for the
   // next container nobody has thought about yet.
-  if (!browserState().ok) {
-    if (!browserWarned && browserState().checked) {
+  if (!browserState('apply').ok) {
+    if (!browserWarned && browserState('apply').checked) {
       browserWarned = true;
-      console.log(`Worker idle: no usable browser on ${browserState().host} (${browserState().note}). Queued applications stay QUEUED for a host that can drive one.`);
+      const b = browserState('apply');
+      console.log(`Worker idle: ${HEADLESS_APPLY ? 'no usable browser' : 'no display to open an apply window'} on ${b.host} (${b.note}). Queued applications stay QUEUED for a host that can drive one.`);
     }
-    checkBrowser().catch(() => {});
+    checkBrowser({ mode: 'apply' }).catch(() => {});
     return;
   }
   browserWarned = false;
@@ -219,12 +223,12 @@ async function launch(app) {
       const detail = String(childOut).split('\n').find((l) => NO_BROWSER_SIG.test(l))?.trim() || 'browser unavailable';
       try {
         await handBackToQueue(app.id, detail.slice(0, 300));
-        await logEvent(app.id, 'run_deferred_no_browser', 'worker', { run_id: runId, host: browserState().host, error: detail.slice(0, 300) });
-        console.log(`[run ${app.id}] no usable browser on ${browserState().host} - application handed back to the queue: ${detail.slice(0, 160)}`);
+        await logEvent(app.id, 'run_deferred_no_browser', 'worker', { run_id: runId, host: browserState('apply').host, error: detail.slice(0, 300) });
+        console.log(`[run ${app.id}] no usable browser on ${browserState('apply').host} - application handed back to the queue: ${detail.slice(0, 160)}`);
       } catch (err) {
         try { await markRunCrash(app.id, `Hand-back failed: ${err.message}`); } catch { /* ignore */ }
       }
-      checkBrowser({ force: true }).catch(() => {});
+      checkBrowser({ force: true, mode: 'apply' }).catch(() => {});
       cleanupRun(runDir);
       return;
     }

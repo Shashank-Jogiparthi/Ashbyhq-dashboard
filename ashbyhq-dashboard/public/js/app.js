@@ -832,8 +832,8 @@ function preScanQueueCard(queue = {}) {
   const br = queue.browser || {};
   const browserPill = br.checked
     ? (br.ok
-      ? `<span class="pill green" style="margin-right:6px;" title="${esc(br.exec || br.note || '')}">browser ready</span>`
-      : `<span class="pill red" style="margin-right:6px;" title="${esc(br.note || '')}">no browser on ${esc(br.host || '?')}</span>`)
+      ? `<span class="pill green" style="margin-right:6px;" title="${esc(br.note || br.exec || '')}">headless browser ready</span>`
+      : `<span class="pill red" style="margin-right:6px;" title="${esc(br.note || '')}">no headless browser on ${esc(br.host || '?')}</span>`)
     : '<span class="pill" style="margin-right:6px;">checking browser…</span>';
   const viaTag = (j) => {
     if (j.status !== 'DONE') return '';
@@ -849,7 +849,7 @@ function preScanQueueCard(queue = {}) {
     <span class="muted small">· headless ${queue.headless === false ? 'OFF (visible window)' : 'ON'} · drafts pre-warmed ${queue.prewarm === false ? 'OFF' : 'ON'} · ${queue.maxConcurrent || 1} at a time</span>
   </p>`);
   if (br.ok === false && br.checked) {
-    bits.push(`<p class="muted small" style="margin-top:2px;">This host cannot launch a browser (${esc(br.note || 'unknown reason')}).
+    bits.push(`<p class="muted small" style="margin-top:2px;">This host cannot launch a headless browser (${esc(br.note || 'unknown reason')}).
       It still answers links from a cached inventory, and anything that needs a page load is
       <b>left queued for a machine that has one</b> — it is never counted as a failed link.</p>`);
   }
@@ -983,12 +983,15 @@ async function renderDevDataSync() {
         browser: <b>${ws.headless ? 'headless' : 'headed (visible)'}</b>${ws.startSpacingMs ? ` · starts spaced ${ws.startSpacingMs}ms` : ''} ·
         ${ws.hostEnabled === false ? '<b style="color:var(--coral)">this host is pinned off (WORKER_ENABLED=false)</b> · ' : ''}
         engine: <span class="mono">${esc(ws.engine || '—')}</span></p>
-      <p class="muted small">Browser capability of <b>${esc(ws.browser?.host || 'this host')}</b>: ${ws.browser?.checked
+      <p class="muted small">Browser capability of <b>${esc(ws.browser?.host || 'this host')}</b> for <b>${ws.headless ? 'headless' : 'headed'}</b> apply runs: ${ws.browser?.checked
         ? (ws.browser.ok
           ? `<span class="pill green">ready</span> <span class="mono">${esc(ws.browser.exec || '')}</span>`
-          : `<span class="pill red">unavailable</span> ${esc(ws.browser.note || '')} — <b>queued applications are not claimed here</b>; they wait for a machine that can open a window.`)
+          : '<span class="pill red">unavailable</span> ' + esc(ws.browser.note || '')
+            + ' — <b>queued applications are not claimed here</b>; they wait for a machine that can run one, and a run handed back for this reason is retried later instead of re-claimed every poll tick.')
         : '<span class="pill">probe not run yet</span>'}
-      — this is measured by launching a browser, not by an environment variable, so it cannot be wrong about the machine.</p>
+      — measured by actually launching a browser in the mode this worker uses (an apply opens a
+      window unless APPLY_HEADLESS=true, a scan loads headlessly), so a container with no display is
+      not mistaken for a host that can submit. That is why it cannot be wrong about the machine.</p>
       <div class="actions">
         <button class="green" id="btn-worker-on" ${data.system.workerEnabled ? 'disabled' : ''}>▶ Enable worker</button>
         <button class="danger" id="btn-worker-off" ${data.system.workerEnabled ? '' : 'disabled'}>■ Disable worker</button>

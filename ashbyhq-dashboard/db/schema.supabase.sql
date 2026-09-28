@@ -167,6 +167,9 @@ CREATE TABLE IF NOT EXISTS applications (
   decision_by         TEXT,
   decision_at         TEXT,
   queued_at           TEXT,
+  -- Hand-back backoff: a QUEUED row a host could not launch is parked until this
+  -- time instead of being re-claimed every poll tick. NULL = due now.
+  next_attempt_at     TEXT,
   finished_at         TEXT,
   created_at          TEXT NOT NULL,
   updated_at          TEXT NOT NULL,

@@ -14,7 +14,10 @@
         browser never claims work it would destroy, a link needing a page load
         is DEFERRED (attempt refunded) instead of failed, a non-form scan is
         refused before it can poison the shared cache, and a machine fault
-        hands an application back to the queue rather than filing FAILED;
+        hands an application back to the queue rather than filing FAILED -
+        parked with a retry time so the same dead host cannot loop on it. The
+        gate answers SEPARATELY for apply (headed) and scan (headless), because
+        those are different machines in practice.
      2. an applicant is addressable by AWL-ID alone (profile present /
         needs a fetch);
      3. the post-SUCCESS privacy erase removes the form data and keeps
@@ -37,7 +40,7 @@ import {
   requeueFailedScanJobs, scanJobCounts, getScanJobByUrl, listEvents,
   purgeApplicantFormData, applicantNeedsProfile, logEvent, upsertFieldAnswer,
   listFieldAnswers, hasBlockingMissingFacts, saveJobLinkFields, applyCaEdits,
-  handBackToQueue
+  handBackToQueue, listQueuedForWorker, claimForRun
 } from '../db/store.js';
 import { scanStateForUrl } from '../worker/link-scanner.js';
 import { browserState, canDriveBrowsers } from '../core/browser-check.js';
@@ -54,6 +57,24 @@ const URL_C = 'https://jobs.ashbyhq.com/verify/33333333-3333-4333-8333-333333333
 let passed = 0;
 let failed = 0;
 const SCAN_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'scan-link.js');
+const PROBE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'core', 'browser-probe.js');
+function runScanScript(url, env) {
+  return runChild(SCAN_SCRIPT, [url], env);
+}
+function runChild(script, args, env) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [script, ...args], {
+      cwd: path.resolve(path.dirname(script), '..'),
+      env: { ...process.env, ...env, AUTO_SCAN_ON_LINK: 'false' },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += String(d); });
+    child.stderr.on('data', (d) => { out += String(d); });
+    child.on('error', (err) => resolve({ code: -1, out: `${out}${err?.message || err}` }));
+    child.on('exit', (code) => resolve({ code: code ?? 1, out }));
+  });
+}
 function check(name, ok, detail = '') {
   if (ok) { passed += 1; console.log(`  PASS  ${name}${detail ? `  (${detail})` : ''}`); }
   else { failed += 1; console.log(`  FAIL  ${name}${detail ? `  -> ${detail}` : ''}`); }
@@ -130,6 +151,12 @@ async function verifySchema() {
     check('link_scan_jobs.scan_via exists (a cache answer must not look like a scan)', true);
   } catch (err) { check('link_scan_jobs.scan_via exists', false, err.message); }
   try {
+    // The hand-back brake: without this column a QUEUED row a host cannot launch
+    // is re-claimed on every poll tick.
+    await db.prepare('SELECT next_attempt_at FROM applications LIMIT 0').all();
+    check('applications.next_attempt_at exists (hand-backs get a pause, not a loop)', true);
+  } catch (err) { check('applications.next_attempt_at exists', false, err.message); }
+  try {
     await db.prepare('SELECT screenshots_json, fail_reason, screenshot_path FROM applications LIMIT 0').all();
     check('status + reason + screenshot columns exist', true);
   } catch (err) { check('status + reason + screenshot columns exist', false, err.message); }
@@ -203,27 +230,38 @@ async function verifyScanQueue() {
    than trusted. Nothing in this section launches a browser. */
 const formFields = (n) => Array.from({ length: n }, (_, i) => ({ question: `Q${i + 1}`, kind: 'text' }));
 
-function runScanScript(url, env) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [SCAN_SCRIPT, url], {
-      cwd: path.resolve(path.dirname(SCAN_SCRIPT), '..'),
-      env: { ...process.env, ...env, AUTO_SCAN_ON_LINK: 'false' },
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    let out = '';
-    child.stdout.on('data', (d) => { out += String(d); });
-    child.stderr.on('data', (d) => { out += String(d); });
-    child.on('error', (err) => resolve({ code: -1, out: `${out}${err?.message || err}` }));
-    child.on('exit', (code) => resolve({ code: code ?? 1, out }));
-  });
-}
-
 async function verifyCapabilityGate() {
   step('2b. browser capability gate + scan verdict rules');
 
   check('a host is treated as incapable until a probe proves otherwise',
     !canDriveBrowsers() && browserState().checked === false,
     `state ${JSON.stringify({ ok: browserState().ok, checked: browserState().checked, host: browserState().host })}`);
+
+  // TWO VERDICTS, because the two workers do not need the same machine. The engine
+  // applies HEADED (a real window is the signal Ashby's anti-spam filter reads) and
+  // scans HEADLESS, so a display-less container is a valid scanner and an invalid
+  // applicator. One headless-only answer is exactly what let Railway report itself
+  // "ready" and then destroy two real CA applications at `browserType.launch:
+  // Target page, context or browser has been closed`, on a loop.
+  const applyVerdict = browserState('apply');
+  const scanVerdict = browserState('scan');
+  check('apply and scan keep SEPARATE verdicts, each starting unchecked',
+    applyVerdict.mode === 'apply' && scanVerdict.mode === 'scan'
+      && applyVerdict.checked === false && scanVerdict.checked === false,
+    JSON.stringify({ apply: applyVerdict.checked, scan: scanVerdict.checked }));
+  check('both modes fail closed before any probe has run',
+    canDriveBrowsers('apply') === false && canDriveBrowsers('scan') === false);
+
+  // The mode has to reach the probe, not just the cache. Point it at a browser
+  // that does not exist and both modes must say MISSING — proof argv[2] is wired
+  // and that neither mode can report a false READY from a missing binary.
+  const bogus = { CHROME_PATH: 'Z:\\no-such-browser-dir\\chrome.exe' };
+  const probeApply = await runChild(PROBE_SCRIPT, ['apply'], bogus);
+  const probeScan = await runChild(PROBE_SCRIPT, ['scan'], bogus);
+  const markerLine = (o) => o.trim().split('\n').find((l) => l.startsWith('BROWSER_PROBE')) || '(no marker line)';
+  check('the probe takes its mode from argv and answers MISSING, never OK',
+    /^BROWSER_PROBE\tMISSING/m.test(probeApply.out) && /^BROWSER_PROBE\tMISSING/m.test(probeScan.out),
+    `apply: ${markerLine(probeApply.out)} | scan: ${markerLine(probeScan.out)}`);
 
   // The verdict rules (pure): the shapes that used to be cached and published.
   const goodPosting = { h1: 'Staff Data Engineer', docTitle: 'Staff Data Engineer - Acme', jobTitle: '', headingAttr: '' };
@@ -282,7 +320,26 @@ async function verifyHandBack(appId) {
   const events = await listEvents({ limit: 20, type: 'application.handback' });
   check('the hand-back is visible in the activity feed', events.some((e) => Number(e.application_id) === Number(appId)));
 
-  await db.prepare("UPDATE applications SET status = 'SUCCESS' WHERE id = ?").run(appId);
+  // The brake. Without a parked retry time the next poll tick re-claims the same
+  // row on the same dead host, and a machine fault becomes a claim/launch/fail
+  // loop: Railway ran the same two applications dozens of times in four minutes.
+  const parked = await db.prepare('SELECT next_attempt_at FROM applications WHERE id = ?').get(appId);
+  check('a handed-back application is PARKED until a retry, not instantly due',
+    Date.parse(parked.next_attempt_at) > Date.now(), `retry at ${String(parked.next_attempt_at).slice(11, 19)}`);
+  check('the queue will not offer it to a host while it is parked',
+    !(await listQueuedForWorker()).some((r) => Number(r.id) === Number(appId)));
+  check('and the atomic claim refuses it too, whatever the poll loop read',
+    (await claimForRun(appId, 'verify-while-parked')) === null,
+    'claim returns null while next_attempt_at is in the future');
+
+  // The pause is a brake on a machine fault, never on a human: as soon as it is
+  // cleared (which is what APPLY and DEV Retry do) the same row is due again.
+  await db.prepare("UPDATE applications SET next_attempt_at = NULL WHERE id = ?").run(appId);
+  check('clearing the pause makes the row due again immediately',
+    (await listQueuedForWorker()).some((r) => Number(r.id) === Number(appId)),
+    'next_attempt_at = NULL means due now');
+
+  await db.prepare("UPDATE applications SET status = 'SUCCESS', next_attempt_at = NULL WHERE id = ?").run(appId);
   const nope = await handBackToQueue(appId, 'verify: a late straggler must not re-open a submission');
   check('a finished submission is never re-opened by a hand-back',
     nope === null && (await db.prepare('SELECT status FROM applications WHERE id = ?').get(appId)).status === 'SUCCESS');

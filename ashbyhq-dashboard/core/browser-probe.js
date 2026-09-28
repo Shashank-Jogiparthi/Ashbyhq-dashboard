@@ -24,6 +24,20 @@
    and closing it is the only honest answer.
 
    Nothing external is contacted: the page is about:blank.
+
+   THE MODE ARGUMENT (argv[2] = 'apply' | 'scan') IS NOT OPTIONAL DETAIL.
+   The two engine paths launch differently and were both live bugs:
+     • SCAN  (engine line ~805): headless unless SCAN_HEADLESS=false.
+     • APPLY (engine line ~647): HEADED unless APPLY_HEADLESS/HEADLESS=true,
+       because a real window on a residential machine is the best signal
+       available to Ashby's anti-spam filter.
+   A probe that always launched headless declared a display-less container
+   "capable" while the engine died there with
+   `browserType.launch: Target page, context or browser has been closed` -
+   a false READY, which is the very bug class this file exists to close. So the
+   probe asks about ONE mode and mirrors that mode's headless flag AND its
+   launch args exactly; a host is capable for a worker only when it is capable
+   in the mode that worker uses.
    ===================================================================== */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -45,6 +59,9 @@ dotenv.config({ path: path.join(REPO, '.env') });
 // banner on every load), so the reader must be able to tell an answer from noise
 // instead of assuming line one is ours.
 const MARKER = 'BROWSER_PROBE';
+// Which worker asked. 'apply' is the destructive one (a real submission), so an
+// absent/unknown argument is treated as 'apply' and gets the stricter answer.
+const MODE = process.argv[2] === 'scan' ? 'scan' : 'apply';
 function say(tag, ...fields) {
   const line = [MARKER, tag, ...fields].join('\t');
   process.stdout.write(`${line}\n`, () => process.exit(0));
@@ -77,20 +94,28 @@ async function main() {
   if (!fs.existsSync(exec)) return say('MISSING', exec);
 
   let browser = null;
+  // Mirror the engine's launch for THIS mode, args included. `--start-maximized`
+  // is only meaningful (and only a possible failure) in headed mode, and a
+  // headed window is precisely what a container without an X display cannot
+  // create - which is the difference between "this host can apply" and "this
+  // host can only scan".
+  const headless = MODE === 'scan'
+    ? String(process.env.SCAN_HEADLESS || '') !== 'false'
+    : (String(process.env.APPLY_HEADLESS || '') === 'true' || String(process.env.HEADLESS || '') === 'true');
   try {
     browser = await chromium.launch({
-      headless: true,
+      headless,
       executablePath: custom || undefined,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      args: ['--no-sandbox', '--disable-setuid-sandbox', ...(headless ? [] : ['--start-maximized'])]
     });
-    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const context = await browser.newContext({ viewport: headless ? { width: 1366, height: 900 } : null });
     const page = await context.newPage();
     await page.goto('about:blank');
     const version = String(browser.version() || '');
     await context.close();
-    return say('OK', exec, version);
+    return say('OK', exec, `${version} ${MODE} ${headless ? 'headless' : 'headed'}`);
   } catch (err) {
-    return say('LAUNCHFAIL', firstLine(err));
+    return say('LAUNCHFAIL', `${firstLine(err)} [${MODE} ${headless ? 'headless' : 'headed'}]`);
   } finally {
     try { await browser?.close(); } catch { /* already gone */ }
   }

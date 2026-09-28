@@ -137,7 +137,12 @@ async function tick() {
   // inventory and never open a window. What it must never do is spend attempts on
   // a link that needs a page it cannot load, so the capability is passed down and
   // that case is DEFERRED (row returned, attempt refunded) instead of FAILED.
-  if (!browserState().ok) checkBrowser().catch(() => {});
+  //
+  // Mode 'scan', never the default: the engine scans HEADLESS and applies
+  // HEADED, so a display-less container is a valid scanner and an invalid
+  // applicator. Asking the apply question here would defer every scan on exactly
+  // the host that can answer it.
+  if (!browserState('scan').ok) checkBrowser({ mode: 'scan' }).catch(() => {});
   try { await requeueStaleScanClaims(STALE_MS); } catch { /* non-fatal */ }
   let job;
   try {
@@ -149,13 +154,13 @@ async function tick() {
   if (!job) return;
   inFlight.set(job.url, { jobId: job.id, startedAt: Date.now(), child: null });
   note('start', { url: job.url, attempt: job.attempts });
-  await logEvent(null, 'link_scan_start', 'scan-worker', { url: job.url, attempt: job.attempts, reason: job.reason, browser: browserState().ok });
+  await logEvent(null, 'link_scan_start', 'scan-worker', { url: job.url, attempt: job.attempts, reason: job.reason, browser: browserState('scan').ok });
   run(job).catch((e) => log('run:', e.message));
 }
 
 async function run(job) {
   const url = job.url;
-  const browserOk = browserState().ok;
+  const browserOk = browserState('scan').ok;
   const outcome = await runScanner(url, browserOk);
   const finishedAt = Date.now();
   const durationMs = finishedAt - (inFlight.get(url)?.startedAt || finishedAt);
@@ -179,7 +184,7 @@ async function run(job) {
   const refused = /Scan refused/.test(out);
   const ok = !needsBrowser && outcome.exitCode === 0 && !outcome.timedOut && !outcome.spawnError;
   const errorText = needsBrowser
-    ? `no browser on ${browserState().host} - waiting for a host that has one`
+    ? `no headless browser on ${browserState('scan').host} - waiting for a host that has one`
     : outcome.timedOut ? `timed out after ${Math.round(TIMEOUT_MS / 60000)}m`
       : outcome.spawnError || describeFailure(out, outcome) || `exit ${outcome.exitCode}`;
 
@@ -200,7 +205,7 @@ async function run(job) {
       });
       log(`done (${fields || '?'} fields via ${via}, ${Math.round(durationMs / 1000)}s${warmed ? `, drafted ${warmed.apps} applicant(s)` : ''}): ${url}`);
     } else if (needsBrowser) {
-      await logEvent(null, 'link_scan_deferred', 'scan-worker', { url, error: errorText, host: browserState().host });
+      await logEvent(null, 'link_scan_deferred', 'scan-worker', { url, error: errorText, host: browserState('scan').host });
       log(`deferred (no browser here): ${url}`);
     } else {
       await logEvent(null, `link_scan_${state === 'FAILED' ? 'failed' : 'retry'}`, 'scan-worker', {
@@ -325,7 +330,7 @@ function runScanner(url, allowBrowser = true) {
 /** Live view for the DEV pane: what is running, due, and recently finished. */
 export async function scanQueueState({ limit = 15 } = {}) {
   const [counts, recent] = await Promise.all([scanJobCounts(), listScanJobs({ limit })]);
-  const browser = browserState();
+  const browser = browserState('scan');
   return {
     enabled: autoScanEnabled(),
     prewarm: draftPrewarmEnabled(),

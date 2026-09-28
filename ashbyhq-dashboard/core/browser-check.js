@@ -15,11 +15,19 @@
    host that fails that test does not claim browser work at all.
 
    Consequences a reader should know:
-     * The answer is per HOST, like WORKER_ENABLED=false, and is never written
-       to the shared database.
+     * The answer is per HOST and per MODE, and is never written to the shared
+       database.
+     * MODES ARE NOT INTERCHANGEABLE, and that was a live bug. The engine applies
+       HEADED (a real window is the best signal available to Ashby's anti-spam
+       filter) and scans HEADLESS. A container with no display can therefore be
+       perfectly capable for scans and incapable for applies - and a single
+       headless-only probe used to call such a container "ready", after which
+       the apply worker claimed CA applications and lost them to
+       `browserType.launch: Target page, context or browser has been closed`.
+       So there are two verdicts, each measured in the mode that worker uses.
      * It is re-checked every BROWSER_RECHECK_MS (default 10m), so installing a
-       browser on a running host starts work again without a redeploy, and a
-       host that loses its browser stops claiming without one.
+       browser (or giving a host a display) starts work again without a redeploy,
+       and a host that loses its browser stops claiming without one.
      * The scan worker is softer than the apply worker: a link can still be
        answered from the local or shared cache with no browser at all, so a
        browserless host may resolve those rows but DEFERS the ones that need a
@@ -45,67 +53,93 @@ const RECHECK_MS = Math.max(60_000, Number(process.env.BROWSER_RECHECK_MS || 10 
 // capable, so the default is a refusal.
 const PROBE_TIMEOUT_MS = Math.max(10_000, Number(process.env.BROWSER_PROBE_TIMEOUT_MS || 90_000));
 
-let state = { ok: false, checked: false, exec: null, note: 'browser check has not run yet', host: os.hostname(), checkedAt: 0 };
-let inflight = null;
+// One verdict per MODE, because "can this host open a window?" and "can this
+// host load a page invisibly?" have different answers on a display-less
+// container. 'apply' is the default everywhere it is not passed explicitly: the
+// stricter, destructive question wins when the caller is vague.
+const MODES = new Map();
+const modeKey = (m) => (m === 'scan' ? 'scan' : 'apply');
+const freshState = () => ({
+  ok: false, checked: false, exec: null, mode: 'apply',
+  note: 'browser check has not run yet', host: os.hostname(), checkedAt: 0
+});
+MODES.set('apply', { ...freshState(), mode: 'apply' });
+MODES.set('scan', { ...freshState(), mode: 'scan' });
+const inflightByMode = new Map();
 
-/** Last known answer, synchronously — worker ticks read this before claiming. */
-export function browserState() {
-  return state;
+/** Last known answer for a mode, synchronously — worker ticks read this before claiming. */
+export function browserState(mode = 'apply') {
+  return MODES.get(modeKey(mode));
 }
 
-/** True only when a probe has actually started a browser on this host. */
-export function canDriveBrowsers() {
-  return state.checked && state.ok;
+/** Both verdicts, for a status surface that must explain a host completely. */
+export function browserStates() {
+  return { apply: MODES.get('apply'), scan: MODES.get('scan') };
+}
+
+/** True only when a probe has actually started a browser in THIS mode on this host. */
+export function canDriveBrowsers(mode = 'apply') {
+  const s = browserState(mode);
+  return s.checked && s.ok;
 }
 
 /**
- * Ask the host whether it can drive a browser. Throttled and de-duplicated: it
- * is safe to call from every worker tick, and `force` is for the moments where
- * a human has just changed something (DEV "re-check", worker enable).
+ * Ask the host whether it can drive a browser in `mode`. Throttled and
+ * de-duplicated per mode: it is safe to call from every worker tick, and `force`
+ * is for the moments where a human has just changed something (DEV "re-check",
+ * a run that died on the launch anyway).
  */
-export function checkBrowser({ force = false } = {}) {
-  if (inflight) return inflight;
+export function checkBrowser({ force = false, mode = 'apply' } = {}) {
+  const key = modeKey(mode);
+  const state = MODES.get(key);
+  if (inflightByMode.get(key)) return inflightByMode.get(key);
   if (!force && state.checked && Date.now() - state.checkedAt < RECHECK_MS) return Promise.resolve(state);
 
-  inflight = runProbe()
-    .then((next) => settle(next))
-    .catch((err) => settle({
-      ...state,
+  const run = runProbe(key)
+    .then((next) => settle(key, next))
+    .catch((err) => settle(key, {
+      ...MODES.get(key),
       ok: false,
       checked: true,
       note: `browser probe errored: ${String(err?.message || err).slice(0, 200)}`,
       checkedAt: Date.now()
     }))
-    .finally(() => { inflight = null; });
-  return inflight;
+    .finally(() => { inflightByMode.delete(key); });
+  inflightByMode.set(key, run);
+  return run;
 }
 
-function settle(next) {
-  const before = state;
-  state = next;
+function settle(key, next) {
+  const before = MODES.get(key);
+  MODES.set(key, next);
   // Loud once, then only when the answer changes: this is the line that explains
   // why a queue is not moving, so it must survive being buried in server logs.
   if (!before.checked) {
     console.log(next.ok
-      ? `Browser ready on ${next.host}: ${next.note}`
-      : `NO BROWSER on ${next.host} (${next.note}) — this host will not claim scans that need a window or apply runs. The queue stays for a machine that can drive a browser.`);
+      ? `Browser ready on ${next.host} for ${key} runs: ${next.note}`
+      : `NO BROWSER for ${key} runs on ${next.host} (${next.note}) — this host will not claim ${key === 'scan' ? 'scans that need a page load' : 'apply runs'}; that work stays queued for a machine that can drive a browser in this mode.`);
   } else if (before.ok !== next.ok) {
     console.log(next.ok
-      ? `Browser became AVAILABLE on ${next.host}: ${next.note} — claiming browser work again.`
-      : `Browser became UNAVAILABLE on ${next.host}: ${next.note} — claiming browser work is paused.`);
+      ? `Browser became AVAILABLE for ${key} runs on ${next.host}: ${next.note} — claiming that work again.`
+      : `Browser became UNAVAILABLE for ${key} runs on ${next.host}: ${next.note} — claiming that work is paused.`);
   }
-  return state;
+  return next;
 }
 
-function report(ok, note, exec = null) {
-  return { ok, checked: true, exec, note: String(note).slice(0, 300), host: os.hostname(), checkedAt: Date.now() };
+function report(ok, note, exec = null, mode = 'apply') {
+  return { ok, checked: true, exec, mode, note: String(note).slice(0, 300), host: os.hostname(), checkedAt: Date.now() };
 }
 
-function runProbe() {
+function runProbe(mode) {
+  // Every answer this promise produces belongs to one mode, so stamp them all
+  // through one helper instead of relying on report()'s default.
+  const rep = (ok, note, exec = null) => report(ok, note, exec, mode);
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(process.execPath, [PROBE], {
+      // argv carries the mode: the probe must launch the way THIS worker's
+      // engine path does, not "a browser" in the abstract.
+      child = spawn(process.execPath, [PROBE, mode], {
         cwd: HERE,
         // The probe resolves Playwright and CHROME_PATH the same way the engine's
         // parent does, so inherit the environment untouched. The two quiet flags
@@ -115,7 +149,7 @@ function runProbe() {
         stdio: ['ignore', 'pipe', 'ignore']
       });
     } catch (err) {
-      resolve(report(false, `could not run the browser probe: ${String(err?.message || err).slice(0, 200)}`));
+      resolve(rep(false, `could not run the browser probe: ${String(err?.message || err).slice(0, 200)}`));
       return;
     }
 
@@ -129,7 +163,7 @@ function runProbe() {
       resolve(result);
     };
     const timer = setTimeout(() => {
-      finish(report(false, `the browser probe never answered within ${Math.round(PROBE_TIMEOUT_MS / 1000)}s`));
+      finish(rep(false, `the browser probe never answered within ${Math.round(PROBE_TIMEOUT_MS / 1000)}s`));
     }, PROBE_TIMEOUT_MS);
     timer.unref?.();
 
@@ -144,12 +178,12 @@ function runProbe() {
         if (!raw.startsWith(MARKER)) continue;
         const [, tag = '', ...fields] = raw.trimEnd().split('\t');
         const detail = String(fields[0] || '').trim();
-        if (tag === 'OK') finish(report(true, `${detail}${fields[1] ? ` (${fields[1]})` : ''}`, detail || null));
-        else if (tag === 'MISSING') finish(report(false, `no browser executable at ${detail || '?'}`));
-        else if (tag === 'NOLOAD') finish(report(false, `Playwright is not installed here (${detail || 'import failed'})`));
-        else if (tag === 'NOEXEC') finish(report(false, detail || 'Playwright could not name a browser path'));
-        else if (tag === 'LAUNCHFAIL') finish(report(false, `browser exists but refused to start: ${detail}`));
-        else finish(report(false, `unknown probe answer "${(tag || raw).slice(0, 160)}"`));
+        if (tag === 'OK') finish(rep(true, `${detail}${fields[1] ? ` (${fields[1]})` : ''}`, detail || null));
+        else if (tag === 'MISSING') finish(rep(false, `no browser executable at ${detail || '?'}`));
+        else if (tag === 'NOLOAD') finish(rep(false, `Playwright is not installed here (${detail || 'import failed'})`));
+        else if (tag === 'NOEXEC') finish(rep(false, detail || 'Playwright could not name a browser path'));
+        else if (tag === 'LAUNCHFAIL') finish(rep(false, `browser exists but refused to start: ${detail}`));
+        else finish(rep(false, `unknown probe answer "${(tag || raw).slice(0, 160)}"`));
         return true;
       }
       return false;
@@ -160,11 +194,11 @@ function runProbe() {
       if (buf.length > 64_000) buf = buf.slice(-32_000);   // bounded, marker survives
       scan();
     });
-    child.on('error', (err) => finish(report(false, `browser probe could not run: ${String(err?.message || err).slice(0, 200)}`)));
+    child.on('error', (err) => finish(rep(false, `browser probe could not run: ${String(err?.message || err).slice(0, 200)}`)));
     child.on('exit', (code) => {
       if (done || scan()) return;
       const noise = buf.trim().split('\n').filter(Boolean).slice(-1)[0] || '';
-      finish(report(false, `browser probe exited (${code ?? 'killed'}) without answering${noise ? `; last output: ${noise.slice(0, 160)}` : ''}`));
+      finish(rep(false, `browser probe exited (${code ?? 'killed'}) without answering${noise ? `; last output: ${noise.slice(0, 160)}` : ''}`));
     });
   });
 }
