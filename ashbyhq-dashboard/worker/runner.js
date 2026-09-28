@@ -21,6 +21,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { ROOT_DIR } from '../db/index.js';
 import { browserState, checkBrowser } from '../core/browser-check.js';
+import { applyLaunchMode, applyLaunchLabel } from '../core/apply-mode.js';
 import {
   listQueuedForWorker, claimForRun, finishRun, markRunCrash,
   getSystemState, logEvent, listFieldAnswers,
@@ -39,9 +40,13 @@ const MAX_CONCURRENT = ['0', '-1', 'unlimited', 'none', 'infinity'].includes(RAW
   ? Infinity
   : Math.max(1, Number(RAW_MAX) || 4);
 const POLL_MS = Math.max(2000, Number(process.env.WORKER_POLL_MS || 8000));
-// Headed is still the engine default; the child inherits our env, so setting
-// APPLY_HEADLESS here (or in .env) is what makes apply runs headless.
-const HEADLESS_APPLY = process.env.APPLY_HEADLESS === 'true' || process.env.HEADLESS === 'true';
+// How an apply run launches HERE, decided once by core/apply-mode.js: an explicit
+// APPLY_HEADLESS/HEADLESS wins, otherwise a linux host with no display runs
+// headless and everything else opens a real window. The engine is never edited,
+// so the answer is handed to it through the child's environment (the engine
+// reads exactly this variable), which keeps engine, probe and worker agreeing.
+const APPLY_MODE = applyLaunchMode();
+const HEADLESS_APPLY = APPLY_MODE.headless;
 // With no cap, one tick would launch every queued browser inside the same
 // second: a RAM spike plus a bot-shaped stampede of identical simultaneous page
 // loads. Space the STARTS (they still all run concurrently afterwards). Ignored
@@ -71,15 +76,21 @@ let pollTimer = null;
 let started = false;
 
 export async function workerStatus() {
-  // Mode 'apply': the engine opens a HEADED window here unless APPLY_HEADLESS,
-  // so this verdict means "can this host show a real browser window", which is a
-  // different question from the scanner's headless one and gets its own answer.
+  // Mode 'apply': the verdict means "can this host launch a browser the way an
+  // apply run needs it", which is a different question from the scanner's
+  // headless one and gets its own answer.
   const browser = browserState('apply');
   return {
     started,
     active: active.size,
     maxConcurrent: Number.isFinite(MAX_CONCURRENT) ? MAX_CONCURRENT : null,
     headless: HEADLESS_APPLY,
+    // WHY it is headless: "configured" when an operator said so, otherwise the
+    // display auto-detection. Surfaced so nobody has to guess whether a container
+    // is obeying them or overriding them.
+    headlessReason: APPLY_MODE.reason,
+    headlessConfigured: APPLY_MODE.explicit,
+    launchMode: applyLaunchLabel(APPLY_MODE),
     startSpacingMs: START_SPACING_MS,
     engine: fs.existsSync(ENGINE_PATH) ? ENGINE_PATH : 'MISSING',
     hostEnabled: !HOST_OPT_OUT,
@@ -96,7 +107,7 @@ export async function start() {
   fs.mkdirSync(RUNS_DIR, { recursive: true });
   pollTimer = setInterval(() => { tick().catch((e) => console.error('worker tick:', e.message)); }, POLL_MS);
   console.log(`Worker started (${Number.isFinite(MAX_CONCURRENT) ? `max ${MAX_CONCURRENT}` : 'unlimited'} concurrent browsers, `
-    + `headless ${HEADLESS_APPLY ? 'on' : 'off (visible windows)'}${START_SPACING_MS ? `, starts spaced ${START_SPACING_MS}ms` : ''}, poll ${POLL_MS}ms).`);
+    + `launch ${applyLaunchLabel(APPLY_MODE)}${START_SPACING_MS ? `, starts spaced ${START_SPACING_MS}ms` : ''}, poll ${POLL_MS}ms).`);
   if (HOST_OPT_OUT) console.log('Worker idle: WORKER_ENABLED=false for this host (shared queue untouched).');
   else if (!browserState('apply').ok) checkBrowser({ mode: 'apply' }).catch(() => {});   // answers on its own
   tick();
@@ -125,7 +136,7 @@ async function tick() {
     if (!browserWarned && browserState('apply').checked) {
       browserWarned = true;
       const b = browserState('apply');
-      console.log(`Worker idle: ${HEADLESS_APPLY ? 'no usable browser' : 'no display to open an apply window'} on ${b.host} (${b.note}). Queued applications stay QUEUED for a host that can drive one.`);
+      console.log(`Worker idle: ${HEADLESS_APPLY ? 'no usable browser' : 'no display to open an apply window'} (${applyLaunchLabel(APPLY_MODE)}) on ${b.host} (${b.note}). Queued applications stay QUEUED for a host that can drive one.`);
     }
     checkBrowser({ mode: 'apply' }).catch(() => {});
     return;
@@ -279,6 +290,10 @@ async function launch(app) {
       windowsHide: true,
       env: {
         ...process.env,
+        // The engine reads APPLY_HEADLESS itself and stays untouched; handing it
+        // the resolved answer is what lets a display-less container submit at all
+        // instead of dying in a headed launch it never had a chance at.
+        APPLY_HEADLESS: String(HEADLESS_APPLY),
         APPLICANT_ID: app.awl_id,
         PERSON_PROFILE_PATH: profileFile,
         APPLICANT_DB_PATH: profileFile,

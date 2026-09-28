@@ -980,7 +980,7 @@ async function renderDevDataSync() {
       <b>Parallel automation worker</b>
       <p class="muted">Enabled: <b>${data.system.workerEnabled ? 'YES' : 'NO'}</b> ·
         active browsers: <b>${ws.active ?? 0}/${ws.maxConcurrent === null || ws.maxConcurrent === undefined ? '∞ uncapped' : ws.maxConcurrent}</b> ·
-        browser: <b>${ws.headless ? 'headless' : 'headed (visible)'}</b>${ws.startSpacingMs ? ` · starts spaced ${ws.startSpacingMs}ms` : ''} ·
+        browser: <b>${esc(ws.launchMode || (ws.headless ? 'headless' : 'headed (visible)'))}</b>${ws.startSpacingMs ? ` · starts spaced ${ws.startSpacingMs}ms` : ''} ·
         ${ws.hostEnabled === false ? '<b style="color:var(--coral)">this host is pinned off (WORKER_ENABLED=false)</b> · ' : ''}
         engine: <span class="mono">${esc(ws.engine || '—')}</span></p>
       <p class="muted small">Browser capability of <b>${esc(ws.browser?.host || 'this host')}</b> for <b>${ws.headless ? 'headless' : 'headed'}</b> apply runs: ${ws.browser?.checked
@@ -989,9 +989,10 @@ async function renderDevDataSync() {
           : '<span class="pill red">unavailable</span> ' + esc(ws.browser.note || '')
             + ' — <b>queued applications are not claimed here</b>; they wait for a machine that can run one, and a run handed back for this reason is retried later instead of re-claimed every poll tick.')
         : '<span class="pill">probe not run yet</span>'}
-      — measured by actually launching a browser in the mode this worker uses (an apply opens a
-      window unless APPLY_HEADLESS=true, a scan loads headlessly), so a container with no display is
-      not mistaken for a host that can submit. That is why it cannot be wrong about the machine.</p>
+      — measured by actually launching a browser the way this worker launches it, so a container is
+      never mistaken for a host that can submit. Apply launches are decided per host
+      (${esc(ws.headlessReason || 'headed window, unless this is a display-less linux box')}), and the
+      same answer is handed to the engine, so the probe cannot bless a mode the run would fail in.</p>
       <div class="actions">
         <button class="green" id="btn-worker-on" ${data.system.workerEnabled ? 'disabled' : ''}>▶ Enable worker</button>
         <button class="danger" id="btn-worker-off" ${data.system.workerEnabled ? '' : 'disabled'}>■ Disable worker</button>

@@ -38,11 +38,16 @@
    probe asks about ONE mode and mirrors that mode's headless flag AND its
    launch args exactly; a host is capable for a worker only when it is capable
    in the mode that worker uses.
+
+   The apply flag comes from core/apply-mode.js rather than being re-derived
+   here, because the worker has to hand the SAME answer to the engine when it
+   spawns a real run. Any drift between the two would rebuild this bug.
    ===================================================================== */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import { applyLaunchMode } from './apply-mode.js';
 
 // The engine reads CHROME_PATH from the repo-root .env, and so does the server.
 // This probe can be run on its own (by a check, by a script, by a human), so it
@@ -101,7 +106,7 @@ async function main() {
   // host can only scan".
   const headless = MODE === 'scan'
     ? String(process.env.SCAN_HEADLESS || '') !== 'false'
-    : (String(process.env.APPLY_HEADLESS || '') === 'true' || String(process.env.HEADLESS || '') === 'true');
+    : applyLaunchMode().headless;
   try {
     browser = await chromium.launch({
       headless,

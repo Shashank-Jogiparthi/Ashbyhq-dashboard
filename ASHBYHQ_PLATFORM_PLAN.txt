@@ -759,8 +759,9 @@ THE GATE IN THE TWO WORKERS
      answer. The apply worker gates on 'apply', the scan worker on 'scan',
      and server.js measures both at boot (sequentially - two cold browser
      launches on a small host compete for memory). A display-less container
-     is therefore a legitimate SCANNER and an illegitimate APPLICATOR, and
-     says so separately in the DEV pane.
+     is a legitimate SCANNER either way, and what it may do as an APPLICATOR
+     is decided by v3.3b below - which is exactly the point of the split,
+     since the two modes used to be reported as one answer.
    • A HANDBACK IS A PAUSE, NOT A RE-QUEUE. applications.next_attempt_at
      (both schemas + idempotent ALTER) is set to now + APPLY_DEFER_MS
      (default 5m) by handBackToQueue, filtered out of listQueuedForWorker()
@@ -768,12 +769,47 @@ THE GATE IN THE TWO WORKERS
      read the row before the pause existed must still lose the race).
      applyApplication() and devRequeue() clear it: a human clicking APPLY or
      Retry means NOW. NULL means due, so nothing about a normal run changes.
-  What this means operationally: with no display, Railway serves the API,
-  the shared cache and headless scans, and LEAVES APPLY RUNS for a host that
-  can open a window - the operator's machine, or a container that sets
-  APPLY_HEADLESS=true (the engine's own comment is honest about that
-  tradeoff: stealth is wired either way, but a datacenter IP is not masked),
-  or one with a virtual display (xvfb). The queue waits; it no longer burns.
+  What this means operationally: a display-less host serves the API, the
+  shared cache and headless scans, and an apply run goes to whatever mode
+  this host's rule resolves to - see v3.3b. The queue waits; it no longer
+  burns.
+
+v3.3b - ONE RULE FOR HOW AN APPLY LAUNCHES (core/apply-mode.js)
+  Splitting the verdict only made Railway honest about something it had been
+  doing all along: it could not apply at all, because headed is the engine's
+  default and a container has no display to honour it. The operator's
+  decision was that Railway applies headlessly. The naive way to get that is
+  to set APPLY_HEADLESS=true in the Railway variables - which works until the
+  next host, or a rebuild that lost the variable, quietly returns the
+  platform to this same half-broken state. So it is a rule, not a setting:
+
+    explicit APPLY_HEADLESS / HEADLESS  -> exactly that, in BOTH directions
+    nothing set + linux with no DISPLAY and no WAYLAND_DISPLAY -> headless
+    anything else (windows, macOS, a box running xvfb)         -> headed
+
+  Three properties are what make it stop coming back:
+   • the engine is STILL untouched (standing rule). worker/runner.js
+     resolves the mode once at boot and passes APPLY_HEADLESS=<the answer>
+     in the child's environment - the variable the engine already reads.
+     Nothing can end up half headless, because probe, worker and child take
+     the value from one call.
+   • the probe asks the SAME rule, so it launches in the mode the run will
+     use. A container that auto-selected headless is measured headless and
+     passes; a container an operator forced to APPLY_HEADLESS=false is
+     measured headed, fails, pins itself off and leaves the applications
+     queued. The false READY that started this repair can no longer be told
+     from inside the gate.
+   • the DEV pane says WHY ("no display on this linux host" as against
+     "configured"), because an automatic decision that looks like a silent
+     override is the next bug report.
+  The cost, stated plainly: a headless apply from a datacenter IP is a
+  weaker anti-bot signal than the window on a residential laptop - the
+  engine's own comment calls headless "a throughput tradeoff, not a free
+  win", and its stealth wiring does not mask the IP. Both hosts now claim
+  from one shared queue, so either can take a row. Where one submission
+  matters more than throughput, set APPLY_HEADLESS=false with xvfb on that
+  host (or WORKER_ENABLED=false to keep it off applies entirely) and the gate
+  will measure that mode honestly instead of faking a READY.
 
 PROVENANCE + JUNK REFUSAL
   link_scan_jobs.scan_via (local-cache | shared-cache | browser,
@@ -813,7 +849,7 @@ BUILD-TIME BROWSER (scripts/ensure-browser.js, repo root)
   APPLYWIZZ_SKIP_BROWSER_INSTALL=true. It is deliberately not in
   postinstall, so a local npm install never pulls ~150MB unasked.
 
-VERIFICATION (npm run verify:flow, now 88 assertions)
+VERIFICATION (npm run verify:flow, now 97 assertions)
   new verifyCapabilityGate() (fail-closed default, verdict rules, a
   REAL cache-only scan-link.js spawn with SCAN_NO_BROWSER=true that
   must exit 3 without launching, the defer/attempt-refund/
@@ -824,7 +860,13 @@ VERIFICATION (npm run verify:flow, now 88 assertions)
   argv wiring is proven (it must answer MISSING, never OK) - plus
   the brake: a handed-back row is parked, is absent from
   listQueuedForWorker(), is refused by claimForRun() while parked, and
-  is due again the moment the pause is cleared. Verifier hygiene on a shared DB learned the hard
+  is due again the moment the pause is cleared. v3.3b asserts the apply
+  launch rule as a truth table (each explicit direction, the HEADLESS alias,
+  linux with no display, DISPLAY present, WAYLAND_DISPLAY present, win32,
+  darwin) and two anti-drift source checks: browser-probe.js and
+  worker/runner.js import core/apply-mode.js with no hand-rolled
+  APPLY_HEADLESS comparison left, and the worker passes the resolved value
+  into the child it spawns. Verifier hygiene on a shared DB learned the hard
   way: claim BY URL (claimNextScanJob({claimer, now, url}) - a
   generic "next due row" claim re-armed other people's work),
   snapshot/restore foreign FAILED rows around the global requeue
@@ -836,9 +878,12 @@ RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
      operator override, but it can only pin a host OFF, never claim
      capability it does not have.
-     A verdict is never shared between modes. 'apply' answers the headed
-     question, 'scan' the headless one; a host may legitimately hold one and
-     fail the other (that is exactly what a container is).
+     A verdict is never shared between modes. 'apply' answers the question
+     in the mode core/apply-mode.js chose for this host (headed on a
+     desktop, headless on a display-less container), 'scan' answers the
+     headless one; a host may legitimately hold one and fail the other.
+     'apply' is HEADED by default on anything with a desktop and only
+     auto-selects headless on linux with no display - see v3.3b.
      A browserless host answers cache hits only; anything needing a
      page load defers quietly for a capable host.
      Refusal is per-SCAN: a genuinely single-question application
@@ -848,5 +893,5 @@ RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      APPLY or a DEV Retry (both clear next_attempt_at), and attempts on
      applications stay a counter, not a cap.
 
-END OF CURRENT-STATE DOC (v3.3) - previous v2 plan superseded; base
+END OF CURRENT-STATE DOC (v3.3b) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

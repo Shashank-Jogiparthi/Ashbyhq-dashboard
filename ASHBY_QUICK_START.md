@@ -188,39 +188,51 @@ other people's failures (links "No scan output produced", applicants
    `about:blank` and remembers the verdict (`core/browser-probe.js` /
    `core/browser-check.js`). The check mirrors the engine's own search:
    `CHROME_PATH` → installed Chrome → Playwright's bundled Chromium.
-2. **One verdict per MODE — apply and scan are different machines.** The engine
+2. **One verdict per MODE — apply and scan are different questions.** The engine
    opens a **headed** window for an application (best signal available to Ashby's
-   anti-spam filter) and a **headless** page for a scan, so each is measured in
-   its own mode. A container with no display is a legitimate scanner and *not* a
-   legitimate applicator; saying one "browser ready" for both is how a deploy
-   once claimed real applications and lost them at `browserType.launch`.
-3. **No browser, no claiming.** The apply worker will not claim a run. The scan
+   anti-spam filter) and a **headless** page for a scan, so each mode is measured
+   on its own terms. Answering both with one headless launch is how a deploy once
+   called itself ready, claimed real applications and lost them at
+   `browserType.launch: Target page, context or browser has been closed`.
+3. **How an apply launches is a rule, not a setting** (`core/apply-mode.js`):
+   an explicit `APPLY_HEADLESS`/`HEADLESS` wins in **both** directions; otherwise
+   a linux host with no `DISPLAY`/`WAYLAND_DISPLAY` applies **headless** and any
+   machine with a desktop applies **headed**. The worker resolves it once, hands
+   the answer to the engine through the child's environment (the engine itself is
+   never edited) and the probe measures that same mode — so probe, worker and run
+   cannot disagree again, and a new host needs no variable set to behave.
+4. **No browser, no claiming.** The apply worker will not claim a run. The scan
    worker may still answer from the local/shared question cache; anything that
    needs a real page load is **deferred** (attempt refunded, retried in
    `SCAN_DEFER_MS`, default 5 minutes) for a browser-capable host.
    `WORKER_ENABLED=false` remains a manual opt-out, but it can only pin a host
    **off** — it can never assert a capability the host does not have.
-4. **A machine's problem stays the machine's problem.** If a run dies on an
+5. **A machine's problem stays the machine's problem.** If a run dies on an
    unavailable browser it is handed back `APPLYING → QUEUED` and **parked** for
    `APPLY_DEFER_MS` (default 5 min) — the host's error is not stored as the
    applicant's failure, a finished submission is never reopened, and the same
    dead host cannot re-claim the row every poll tick. A CA's APPLY or a DEV's
    Retry clears that pause immediately: a human pressing the button means now.
-5. **Provenance is visible.** `link_scan_jobs.scan_via` records whether a
+6. **Provenance is visible.** `link_scan_jobs.scan_via` records whether a
    `✓ scanned` came from `local-cache`, `shared-cache` or a real `browser` scan,
-   and the DEV pane shows the host's browser capability per mode plus that tag —
-   so an 8-second cache answer can't be mistaken for a page load.
-6. **Junk never lands.** A scan whose page reads like a listing/404, or that
+   and the DEV pane shows the host's browser capability per mode, which launch
+   mode an apply will use and why, plus that tag — so an 8-second cache answer
+   can't be mistaken for a page load.
+7. **Junk never lands.** A scan whose page reads like a listing/404, or that
    returns one field on a non-`/application` URL, is refused: nothing stored,
    nothing published to the shared cache.
 
-**So where do applies run?** On a host that can open a window — normally your
-own machine with the dashboard running (`npm start`, worker enabled). A
-container can take over the submissions too only if it either sets
-`APPLY_HEADLESS=true` (works, but the datacenter IP is not masked, so treat it
-as a throughput tradeoff) or provides a virtual display (xvfb). Until then it
-serves the API, the shared question cache and the headless scans, and leaves
-QUEUED applications alone — waiting, not failing.
+**So where do applies run?** On any host that can launch a browser. Your own
+machine opens a real window (`npm start`, worker enabled); a Railway container
+submits **headlessly**, because it has no display and the rule above says so —
+no variable has to be set, and a rebuild cannot lose the setting. Both hosts poll
+the **same** queue, so whichever is free takes the row. Headless from a
+datacenter IP is a throughput tradeoff (the stealth wiring does not mask the IP),
+so for submissions where the visible window matters, point `WORKER_ENABLED=false`
+at the container and let the laptop take them; set `APPLY_HEADLESS=false` with a
+real display or xvfb if you want headed runs on a server. Either way a host that
+cannot produce the mode it asked for measures itself as **unable to apply** and
+leaves QUEUED rows alone instead of faking a READY.
 
 **Build command** (`railway.json`) is now:
 
@@ -236,7 +248,7 @@ better than a deploy that does not start. Skip it with
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 88 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 97 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers
 ```
 

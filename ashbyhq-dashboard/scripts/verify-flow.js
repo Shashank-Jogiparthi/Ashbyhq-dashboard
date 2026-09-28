@@ -16,8 +16,9 @@
         refused before it can poison the shared cache, and a machine fault
         hands an application back to the queue rather than filing FAILED -
         parked with a retry time so the same dead host cannot loop on it. The
-        gate answers SEPARATELY for apply (headed) and scan (headless), because
-        those are different machines in practice.
+        gate answers SEPARATELY for apply and scan, because those are different
+        machines in practice, and how an APPLY launches is decided once for the
+        whole platform by core/apply-mode.js.
      2. an applicant is addressable by AWL-ID alone (profile present /
         needs a fetch);
      3. the post-SUCCESS privacy erase removes the form data and keeps
@@ -32,6 +33,7 @@
    expects "seen 0" (proves the fetch path works without a browser).
    ===================================================================== */
 import { migrate, db, nowIso, BACKEND } from '../db/index.js';
+import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +46,7 @@ import {
 } from '../db/store.js';
 import { scanStateForUrl } from '../worker/link-scanner.js';
 import { browserState, canDriveBrowsers } from '../core/browser-check.js';
+import { applyLaunchMode } from '../core/apply-mode.js';
 import { judgeScan, inventoryIsResidue } from '../core/scan-verdict.js';
 import { buildReviewQuestions, questionIsOptional } from '../draft-service.js';
 import { fieldKeyOf } from '../../field-applier.js';
@@ -58,6 +61,7 @@ let passed = 0;
 let failed = 0;
 const SCAN_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'scan-link.js');
 const PROBE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'core', 'browser-probe.js');
+const RUNNER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'runner.js');
 function runScanScript(url, env) {
   return runChild(SCAN_SCRIPT, [url], env);
 }
@@ -262,6 +266,42 @@ async function verifyCapabilityGate() {
   check('the probe takes its mode from argv and answers MISSING, never OK',
     /^BROWSER_PROBE\tMISSING/m.test(probeApply.out) && /^BROWSER_PROBE\tMISSING/m.test(probeScan.out),
     `apply: ${markerLine(probeApply.out)} | scan: ${markerLine(probeScan.out)}`);
+
+  // ONE RULE FOR HOW AN APPLY LAUNCHES. Three places used to decide "headed or
+  // headless" by hand and disagreed, which is how a display-less container called
+  // itself READY: the engine died mid-submission while the probe, launching
+  // headless, saw no problem. So the rule is asserted as a table, and the
+  // hand-rolled copies are asserted to be gone. A container that applies headed
+  // cannot apply at all; a laptop forced headless throws away the one signal
+  // Ashby's anti-spam filter reads, so both directions of the table matter.
+  check('APPLY_HEADLESS=true forces headless, even on a desktop',
+    applyLaunchMode({ APPLY_HEADLESS: 'true' }, 'win32').headless === true);
+  check('APPLY_HEADLESS=false forces a real window, even on a host with no display',
+    applyLaunchMode({ APPLY_HEADLESS: 'false' }, 'linux').headless === false,
+    applyLaunchMode({ APPLY_HEADLESS: 'false' }, 'linux').reason);
+  check("the engine's HEADLESS alias is honoured too",
+    applyLaunchMode({ HEADLESS: 'true' }, 'win32').headless === true);
+  check('a linux container with no display applies HEADLESS (the Railway case)',
+    applyLaunchMode({}, 'linux').headless === true && applyLaunchMode({ DISPLAY: '  ' }, 'linux').headless === true);
+  check('...and stops guessing the moment a display exists',
+    applyLaunchMode({ DISPLAY: ':0' }, 'linux').headless === false
+      && applyLaunchMode({ WAYLAND_DISPLAY: 'wayland-0' }, 'linux').headless === false,
+    'a Wayland-only desktop has no DISPLAY and must not be forced hidden');
+  check('a desktop OS keeps the visible window it can actually show',
+    applyLaunchMode({}, 'win32').headless === false && applyLaunchMode({}, 'darwin').headless === false);
+  check('an automatic decision says why, a configured one says so',
+    /display/.test(applyLaunchMode({}, 'linux').reason)
+      && applyLaunchMode({}, 'linux').explicit === false
+      && applyLaunchMode({ APPLY_HEADLESS: 'true' }, 'win32').explicit === true);
+
+  const probeSrc = fs.readFileSync(PROBE_SCRIPT, 'utf8');
+  const runnerSrc = fs.readFileSync(RUNNER_SCRIPT, 'utf8');
+  check('the probe and the worker both ask apply-mode.js instead of re-deriving it',
+    /apply-mode\.js/.test(probeSrc) && /apply-mode\.js/.test(runnerSrc)
+      && !/APPLY_HEADLESS[^\n]*===\s*'true'/.test(probeSrc)
+      && !/APPLY_HEADLESS[^\n]*===\s*'true'/.test(runnerSrc));
+  check('the worker hands the resolved mode to the engine it spawns (the engine itself is never edited)',
+    /APPLY_HEADLESS:\s*String\(HEADLESS_APPLY\)/.test(runnerSrc));
 
   // The verdict rules (pure): the shapes that used to be cached and published.
   const goodPosting = { h1: 'Staff Data Engineer', docTitle: 'Staff Data Engineer - Acme', jobTitle: '', headingAttr: '' };
