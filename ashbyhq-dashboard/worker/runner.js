@@ -14,6 +14,10 @@
      unknown        -> PENDING  (submitted, acknowledgement unclear)
      manual-review  -> PENDING  (no submit button; needs a human)
      crash / no-outcome -> FAILED (engine crashed)
+  A run with NO outcome at all is a different thing: if the process was killed
+  or said nothing, no form was ever reached, so it is a HOST fault and the
+  application is handed back to the queue rather than filed as FAILED
+  (core/host-fault.js).
    ===================================================================== */
 import fs from 'fs';
 import os from 'os';
@@ -22,6 +26,8 @@ import { spawn } from 'child_process';
 import { ROOT_DIR } from '../db/index.js';
 import { browserState, checkBrowser } from '../core/browser-check.js';
 import { applyLaunchMode, applyLaunchLabel } from '../core/apply-mode.js';
+import { classifyRunFault } from '../core/host-fault.js';
+import { browserCapacity, effectiveLimit } from '../core/host-capacity.js';
 import {
   listQueuedForWorker, claimForRun, finishRun, markRunCrash,
   getSystemState, logEvent, listFieldAnswers,
@@ -32,13 +38,20 @@ import {
 const WORKSPACE_ROOT = path.resolve(ROOT_DIR, '..');
 const ENGINE_PATH = process.env.ENGINE_PATH
   || path.join(WORKSPACE_ROOT, 'ashby-hybrid-automation.js');
-// How many apply browsers this worker drives at once. 0 / -1 / "unlimited"
-// removes the cap entirely: every QUEUED row is claimed and launched, so the
-// only ceiling left is the machine itself (one Chromium per run).
+// How many apply browsers this worker drives at once. 0 / -1 / "unlimited" asks
+// for every QUEUED row to be launched simultaneously; the host's measured
+// capacity below decides what that actually means.
 const RAW_MAX = String(process.env.MAX_CONCURRENT_RUNS ?? '4').trim().toLowerCase();
-const MAX_CONCURRENT = ['0', '-1', 'unlimited', 'none', 'infinity'].includes(RAW_MAX)
+const WANTED_MAX = ['0', '-1', 'unlimited', 'none', 'infinity'].includes(RAW_MAX)
   ? Infinity
   : Math.max(1, Number(RAW_MAX) || 4);
+// One Chromium per run is a real memory bill, and a queue that ignores it is
+// paid for by whichever application the kernel chooses to kill. So the number is
+// capped by what THIS machine can hold (core/host-capacity.js): "unlimited"
+// becomes "as many as fit", an explicit 4 becomes 4 or fewer, and a laptop with
+// plenty of RAM is not slowed down by a rule written for containers.
+const BUDGET = browserCapacity();
+const MAX_CONCURRENT = effectiveLimit(WANTED_MAX, BUDGET).limit;
 const POLL_MS = Math.max(2000, Number(process.env.WORKER_POLL_MS || 8000));
 // How an apply run launches HERE, decided once by core/apply-mode.js: an explicit
 // APPLY_HEADLESS/HEADLESS wins, otherwise a linux host with no display runs
@@ -51,7 +64,7 @@ const HEADLESS_APPLY = APPLY_MODE.headless;
 // second: a RAM spike plus a bot-shaped stampede of identical simultaneous page
 // loads. Space the STARTS (they still all run concurrently afterwards). Ignored
 // while a cap exists, because the cap already paces them.
-const START_SPACING_MS = Number.isFinite(MAX_CONCURRENT)
+const START_SPACING_MS = WANTED_MAX === Infinity
   ? 0 : Math.max(0, Number(process.env.RUN_START_SPACING_MS ?? 1500));
 // Runs use an OS temp dir OUTSIDE the repo so no applicant artefact (profile,
 // answers, downloaded resume, engine job-status JSON, screenshots) ever lands
@@ -83,7 +96,12 @@ export async function workerStatus() {
   return {
     started,
     active: active.size,
-    maxConcurrent: Number.isFinite(MAX_CONCURRENT) ? MAX_CONCURRENT : null,
+    maxConcurrent: MAX_CONCURRENT,
+    // What an operator asked for vs what this host was allowed: "uncapped" here
+    // with maxConcurrent 2 means the memory measurement said 2, not that a
+    // setting was ignored.
+    wantedConcurrent: WANTED_MAX === Infinity ? 'unlimited' : WANTED_MAX,
+    hostCapacity: { capacity: BUDGET.capacity, memMb: Math.round(BUDGET.memBytes / 1048576), perBrowserMb: Math.round(BUDGET.perBrowserBytes / 1048576), source: BUDGET.source, reason: BUDGET.reason },
     headless: HEADLESS_APPLY,
     // WHY it is headless: "configured" when an operator said so, otherwise the
     // display auto-detection. Surfaced so nobody has to guess whether a container
@@ -106,7 +124,8 @@ export async function start() {
   started = true;
   fs.mkdirSync(RUNS_DIR, { recursive: true });
   pollTimer = setInterval(() => { tick().catch((e) => console.error('worker tick:', e.message)); }, POLL_MS);
-  console.log(`Worker started (${Number.isFinite(MAX_CONCURRENT) ? `max ${MAX_CONCURRENT}` : 'unlimited'} concurrent browsers, `
+  console.log(`Worker started (${MAX_CONCURRENT} concurrent browsers max `
+    + `(wanted ${WANTED_MAX === Infinity ? 'unlimited' : WANTED_MAX}, host fits ${BUDGET.capacity}: ${BUDGET.reason}), `
     + `launch ${applyLaunchLabel(APPLY_MODE)}${START_SPACING_MS ? `, starts spaced ${START_SPACING_MS}ms` : ''}, poll ${POLL_MS}ms).`);
   if (HOST_OPT_OUT) console.log('Worker idle: WORKER_ENABLED=false for this host (shared queue untouched).');
   else if (!browserState('apply').ok) checkBrowser({ mode: 'apply' }).catch(() => {});   // answers on its own
@@ -208,6 +227,7 @@ async function launch(app) {
   // the run directory, so keep a bounded echo of it here. It is the only way to
   // tell "this machine has no browser" apart from "the form rejected us".
   let childOut = '';
+  let childExit = { code: null, signal: null };
   const echo = (chunk, stream, prefix) => {
     childOut += chunk;
     if (childOut.length > 16_000) childOut = childOut.slice(-12_000);
@@ -225,17 +245,31 @@ async function launch(app) {
       if (status === 'success') outcome = 'success';
       else if (status === 'failed') { outcome = 'failed'; reason = result.bannerText || result.reason || 'Validation error'; }
       else if (status === 'unknown' || status === 'manual-review' || status === 'pending') { outcome = 'pending'; reason = status === 'manual-review' ? 'No submit button (manual review)' : 'Outcome unclear'; }
+      // A result file that names no status is still proof the page was reached,
+      // so it stays a failure - but say WHICH outcome, not the no-result sentence.
+      else if (outcome === 'failed') reason = result.bannerText || result.reason || `Engine reported no recognised outcome${status ? ` (${status})` : ''}`;
       if (Array.isArray(result.missingFields)) missingFields = result.missingFields;
     }
-    // Host fault, not applicant fault: a machine that could not start a browser
-    // hands the application back to the queue instead of filing a FAILED record,
-    // and re-probes itself right now so it stops claiming further runs.
-    if (outcome !== 'success' && looksLikeNoBrowser(childOut)) {
-      const detail = String(childOut).split('\n').find((l) => NO_BROWSER_SIG.test(l))?.trim() || 'browser unavailable';
+    // Whose fault is this? core/host-fault.js decides from evidence, and the two
+    // host-fault shapes are: the machine could not produce a browser at all, or
+    // the process was killed / said nothing without ever writing a result. In
+    // both cases no form was reached, so the application goes back to the queue
+    // (parked, retried later) instead of carrying a machine's problem as its own
+    // FAILED record, and the host re-probes itself so it stops claiming runs.
+    const fault = classifyRunFault({
+      hasResult: Boolean(result),
+      outcome,
+      exitCode: childExit.code,
+      exitSignal: childExit.signal,
+      output: childOut,
+      concurrent: active.size + 1
+    });
+    if (fault.hostFault) {
+      const detail = fault.reason || 'browser unavailable';
       try {
         await handBackToQueue(app.id, detail.slice(0, 300));
-        await logEvent(app.id, 'run_deferred_no_browser', 'worker', { run_id: runId, host: browserState('apply').host, error: detail.slice(0, 300) });
-        console.log(`[run ${app.id}] no usable browser on ${browserState('apply').host} - application handed back to the queue: ${detail.slice(0, 160)}`);
+        await logEvent(app.id, 'run_deferred_host_fault', 'worker', { run_id: runId, host: browserState('apply').host, error: detail.slice(0, 300), exit_code: childExit.code, exit_signal: childExit.signal, concurrent: active.size + 1, capacity: MAX_CONCURRENT });
+        console.log(`[run ${app.id}] host fault on ${browserState('apply').host} - application handed back to the queue: ${detail.slice(0, 160)}`);
       } catch (err) {
         try { await markRunCrash(app.id, `Hand-back failed: ${err.message}`); } catch { /* ignore */ }
       }
@@ -243,6 +277,12 @@ async function launch(app) {
       cleanupRun(runDir);
       return;
     }
+    // A genuine run the engine never got to write up: keep its own last line as
+    // the reason so a DEV can read what actually happened. The placeholder
+    // sentence hid everything about the Drata failure.
+    if (!result && fault.reason) reason = fault.reason.slice(0, 300);
+    // A success must not carry a leftover failure sentence in its event either.
+    if (outcome === 'success') reason = '';
     // Two evidence screenshots are captured per run: #1 the fully-filled form
     // BEFORE Submit, #2 the post-submit acknowledgement. They live only in the
     // temp dir, so upload them to Supabase Storage now (before cleanup) and
@@ -303,7 +343,10 @@ async function launch(app) {
     });
     child.stdout.on('data', (d) => echo(d, process.stdout, `[run ${app.id}] `));
     child.stderr.on('data', (d) => echo(d, process.stderr, `[run ${app.id}!] `));
-    child.on('close', () => finish());
+    // The exit code and signal are evidence, not bookkeeping: "killed by SIGKILL
+    // with no result" is a memory death, "exit 1 with a fatal error printed" is
+    // the engine's own failure, and only the second one belongs to the applicant.
+    child.on('close', (code, signal) => { childExit = { code, signal }; finish(); });
     child.on('error', async (err) => {
       active.delete(app.id);
       try { await markRunCrash(app.id, `Spawn error: ${err.message}`); } catch { /* ignore */ }
@@ -313,16 +356,6 @@ async function launch(app) {
 }
 
 /* ------------------------------ helpers ----------------------------- */
-
-// Signatures of "this machine could not produce a browser at all", as opposed to
-// "the automation tried and something on the page went wrong". Only the first
-// one is a host fault, and only a host fault may send an application back to the
-// queue untouched - the applicant must never carry a machine's missing binary as
-// a FAILED record.
-const NO_BROWSER_SIG = /Executable doesn't exist|Please run the following command to download new browsers|Failed to launch the browser process|error while loading shared libraries|browserType\.launch/i;
-function looksLikeNoBrowser(output) {
-  return NO_BROWSER_SIG.test(String(output || ''));
-}
 
 // Load the merged CRM profile into `app` in place when it is missing/empty.
 // Never throws: with no CRM configured the run proceeds on whatever is stored.

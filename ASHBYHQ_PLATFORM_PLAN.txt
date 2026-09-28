@@ -811,6 +811,45 @@ v3.3b - ONE RULE FOR HOW AN APPLY LAUNCHES (core/apply-mode.js)
   host (or WORKER_ENABLED=false to keep it off applies entirely) and the gate
   will measure that mode honestly instead of faking a READY.
 
+v3.3c - THE HOST'S BUDGET, AND WHO PAYS FOR A DEATH
+  With the gate in place Railway went and DID apply: one tick claimed three
+  applications (Drata, Render, FutureFit) and launched three Chromiums at once.
+  Two submitted normally after ~90 seconds, screenshots and all. The third died
+  six seconds in - no result JSON, no screenshot, nothing printed - and was
+  filed as the applicant's FAILED application with the placeholder reason
+  "Engine process exited without a result". Nothing had been submitted and
+  nothing had been judged: the kernel ran out of memory and chose a victim, and
+  the applicant wore the machine's problem as a rejection. Same bug class as the
+  missing binary, second flavour, found because the deploy was finally able to
+  run. Two rules close it:
+   • COUNT BROWSERS AGAINST REAL MEMORY (core/host-capacity.js). Capacity is
+     bytes available / 512MB per browser (APPLY_BROWSER_MB to change), where
+     "available" is read from the cgroup limit first - os.totalmem() inside a
+     container reports the HOST NODE, so a 512MB service on an 8GB machine
+     would otherwise be told it can run sixteen browsers - falling back to
+     os.totalmem() on a normal laptop. MAX_CONCURRENT_RUNS stays the operator's
+     CEILING and is now clamped by it; "unlimited" means "as many as fit", never
+     an infinite number; capacity is never below 1 so a tiny host still works,
+     just one at a time. The scanner takes at most half the budget (a scan that
+     waits costs minutes and is refunded/deferred; an apply that dies costs a
+     person), and both numbers plus the reason are in the DEV pane. Overrides:
+     MAX_BROWSERS, HOST_MEM_MB, APPLY_BROWSER_MB.
+   • A DEATH WITH NO EVIDENCE IS A HOST FAULT (core/host-fault.js, pure and
+     asserted). An application may only be FAILED on evidence the FORM was
+     reached: the engine wrote a result, or it printed its own error. So the
+     browser-signature rule, "killed by a signal / exit 137-143 with no result"
+     and "exited without a result or any output at all" all hand the row back
+     to the queue, parked for APPLY_DEFER_MS and retried, while a run that
+     reached the page keeps its banner. A SUCCESS never hands back. When a real
+     run leaves no result but did print something, that last line is now the
+     recorded reason instead of the placeholder - #62 was undiagnosable for
+     exactly this reason, and the exit code/signal/concurrent-count/capacity are
+     logged on the hand-back event so the next one explains itself.
+  Residual, stated: the two workers are capped by the same budget separately, so
+  1 apply + 1 scan can still be two Chromiums on a one-browser host. The
+  estimate is deliberately conservative and the classifier is the backstop - a
+  death without evidence costs a wait, not an applicant.
+
 PROVENANCE + JUNK REFUSAL
   link_scan_jobs.scan_via (local-cache | shared-cache | browser,
   NULL on failure) makes an 8s "✓ scanned" legible as a cache answer
@@ -849,7 +888,7 @@ BUILD-TIME BROWSER (scripts/ensure-browser.js, repo root)
   APPLYWIZZ_SKIP_BROWSER_INSTALL=true. It is deliberately not in
   postinstall, so a local npm install never pulls ~150MB unasked.
 
-VERIFICATION (npm run verify:flow, now 97 assertions)
+VERIFICATION (npm run verify:flow, now 115 assertions)
   new verifyCapabilityGate() (fail-closed default, verdict rules, a
   REAL cache-only scan-link.js spawn with SCAN_NO_BROWSER=true that
   must exit 3 without launching, the defer/attempt-refund/
@@ -866,7 +905,13 @@ VERIFICATION (npm run verify:flow, now 97 assertions)
   darwin) and two anti-drift source checks: browser-probe.js and
   worker/runner.js import core/apply-mode.js with no hand-rolled
   APPLY_HEADLESS comparison left, and the worker passes the resolved value
-  into the child it spawns. Verifier hygiene on a shared DB learned the hard
+  into the child it spawns. v3.3c adds the budget (512MB container = 1 browser,
+  2GB = 4, never zero, APPLY_BROWSER_MB and MAX_BROWSERS honoured, unlimited =
+  as many as fit, an explicit cap clamped but a roomy laptop untouched) and the
+  fault split (killed with no result, exit 137, silent exit, missing browser,
+  never after a SUCCESS, a printed fatal error stays the applicant's FAILED with
+  the real line as its reason) plus source checks that the worker uses the
+  classifier and keeps exit code/signal as evidence. Verifier hygiene on a shared DB learned the hard
   way: claim BY URL (claimNextScanJob({claimer, now, url}) - a
   generic "next due row" claim re-armed other people's work),
   snapshot/restore foreign FAILED rows around the global requeue
@@ -878,6 +923,9 @@ RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
      operator override, but it can only pin a host OFF, never claim
      capability it does not have.
+     Concurrency is a measured ceiling, not a promise: MAX_CONCURRENT_RUNS is
+     clamped by what the host's memory can hold, and only MAX_BROWSERS can
+     raise the estimate. A capacity of 1 still runs - one browser at a time.
      A verdict is never shared between modes. 'apply' answers the question
      in the mode core/apply-mode.js chose for this host (headed on a
      desktop, headless on a display-less container), 'scan' answers the
@@ -893,5 +941,5 @@ RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      APPLY or a DEV Retry (both clear next_attempt_at), and attempts on
      applications stay a counter, not a cap.
 
-END OF CURRENT-STATE DOC (v3.3b) - previous v2 plan superseded; base
+END OF CURRENT-STATE DOC (v3.3c) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

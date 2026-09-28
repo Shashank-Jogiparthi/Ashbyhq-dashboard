@@ -36,6 +36,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJobUrl } from '../core/job-url.js';
 import { browserState, checkBrowser } from '../core/browser-check.js';
+import { browserCapacity } from '../core/host-capacity.js';
 import {
   enqueueScanJobs, claimNextScanJob, finishScanJob, markScanJobDuration,
   requeueStaleScanClaims, listScanJobs, scanJobCounts, getScanJobByUrl,
@@ -48,7 +49,15 @@ const SCANNER = path.join(DASHBOARD, 'scripts', 'scan-link.js');
 
 const TIMEOUT_MS = Math.max(60_000, Number(process.env.SCAN_TIMEOUT_MS || 15 * 60 * 1000));
 const POLL_MS = Math.max(3000, Number(process.env.SCAN_POLL_MS || 8000));
-const MAX_SCAN = Math.max(1, Number(process.env.SCAN_CONCURRENCY || 1));
+// A scan is only one page load, but it is still a Chromium, and the same host
+// usually runs the apply worker too. The apply side owns real submissions, so it
+// gets the host's measured browser capacity and the scanner takes at most half of
+// it (never below 1, which is already its code default). A scan that has to wait
+// costs a few minutes and is refunded/deferred gracefully; an apply killed by
+// memory pressure costs an applicant, which is why the split leans this way.
+const SCAN_BUDGET = browserCapacity();
+const WANTED_SCAN = Math.max(1, Number(process.env.SCAN_CONCURRENCY || 1));
+const MAX_SCAN = Math.min(WANTED_SCAN, Math.max(1, Math.floor(SCAN_BUDGET.capacity / 2)));
 const CLAIMER = `${os.hostname()}:${process.pid}`;
 // A claim is presumed dead only after its own timeout could have elapsed.
 const STALE_MS = TIMEOUT_MS + 120_000;
@@ -116,7 +125,7 @@ export function start() {
   requeueStaleScanClaims(STALE_MS).then((n) => { if (n) log(`recovered ${n} stale claim(s)`); })
     .catch((e) => log('stale sweep:', e.message));
   tick().catch((e) => log('first tick:', e.message));
-  log(`started (max ${MAX_SCAN} concurrent, poll ${POLL_MS}ms, headless ${process.env.SCAN_HEADLESS === 'false' ? 'off' : 'on'}).`);
+  log(`started (max ${MAX_SCAN} concurrent${WANTED_SCAN > MAX_SCAN ? ` of ${WANTED_SCAN} wanted, host fits ${SCAN_BUDGET.capacity}` : ''}, poll ${POLL_MS}ms, headless ${process.env.SCAN_HEADLESS === 'false' ? 'off' : 'on'}).`);
   return status();
 }
 
@@ -338,6 +347,10 @@ export async function scanQueueState({ limit = 15 } = {}) {
     claimer: CLAIMER,
     started,
     maxConcurrent: MAX_SCAN,
+    // Visible so "the scanner is slower than I configured" is explainable: it is
+    // this host's memory saying so, not a setting being ignored.
+    wantedConcurrent: WANTED_SCAN,
+    hostCapacity: SCAN_BUDGET.reason,
     pollMs: POLL_MS,
     timeoutMs: TIMEOUT_MS,
     // This host's own answer to "can you open a window". A browserless container

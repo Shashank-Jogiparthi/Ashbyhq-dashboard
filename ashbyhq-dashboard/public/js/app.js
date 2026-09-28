@@ -846,7 +846,7 @@ function preScanQueueCard(queue = {}) {
   bits.push(`<p style="margin:6px 0;">
     ${browserPill}${pill('pending', c.PENDING)}${pill('scanning', c.RUNNING)}${pill('done', c.DONE, 'green')}
     ${c.FAILED ? pill('failed', c.FAILED, 'red') : ''}
-    <span class="muted small">· headless ${queue.headless === false ? 'OFF (visible window)' : 'ON'} · drafts pre-warmed ${queue.prewarm === false ? 'OFF' : 'ON'} · ${queue.maxConcurrent || 1} at a time</span>
+    <span class="muted small">· headless ${queue.headless === false ? 'OFF (visible window)' : 'ON'} · drafts pre-warmed ${queue.prewarm === false ? 'OFF' : 'ON'} · ${queue.maxConcurrent || 1} at a time${queue.wantedConcurrent > queue.maxConcurrent ? ' (host memory limit)' : ''}</span>
   </p>`);
   if (br.ok === false && br.checked) {
     bits.push(`<p class="muted small" style="margin-top:2px;">This host cannot launch a headless browser (${esc(br.note || 'unknown reason')}).
@@ -981,6 +981,7 @@ async function renderDevDataSync() {
       <p class="muted">Enabled: <b>${data.system.workerEnabled ? 'YES' : 'NO'}</b> ·
         active browsers: <b>${ws.active ?? 0}/${ws.maxConcurrent === null || ws.maxConcurrent === undefined ? '∞ uncapped' : ws.maxConcurrent}</b> ·
         browser: <b>${esc(ws.launchMode || (ws.headless ? 'headless' : 'headed (visible)'))}</b>${ws.startSpacingMs ? ` · starts spaced ${ws.startSpacingMs}ms` : ''} ·
+        ${ws.hostCapacity ? `host holds <b>${ws.hostCapacity.capacity}</b> browser(s) <span class="muted small">(${esc(ws.hostCapacity.reason || '')})</span> · ` : ''}
         ${ws.hostEnabled === false ? '<b style="color:var(--coral)">this host is pinned off (WORKER_ENABLED=false)</b> · ' : ''}
         engine: <span class="mono">${esc(ws.engine || '—')}</span></p>
       <p class="muted small">Browser capability of <b>${esc(ws.browser?.host || 'this host')}</b> for <b>${ws.headless ? 'headless' : 'headed'}</b> apply runs: ${ws.browser?.checked

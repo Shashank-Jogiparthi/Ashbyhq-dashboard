@@ -201,18 +201,29 @@ other people's failures (links "No scan output produced", applicants
    the answer to the engine through the child's environment (the engine itself is
    never edited) and the probe measures that same mode — so probe, worker and run
    cannot disagree again, and a new host needs no variable set to behave.
-4. **No browser, no claiming.** The apply worker will not claim a run. The scan
-   worker may still answer from the local/shared question cache; anything that
-   needs a real page load is **deferred** (attempt refunded, retried in
-   `SCAN_DEFER_MS`, default 5 minutes) for a browser-capable host.
+4. **No browser, no claiming — and no more browsers than the host can hold.** The
+   apply worker will not claim a run it cannot launch. How many it may run at once
+   is measured too (`core/host-capacity.js`: available memory ÷ 512MB per browser,
+   read from the container's cgroup limit because `os.totalmem()` reports the host
+   *node*): `MAX_CONCURRENT_RUNS` is a ceiling that gets clamped, "unlimited" means
+   "as many as fit", and a roomy laptop is unaffected. The scan worker takes at most
+   half the budget — a scan that waits costs minutes and is deferred/refunded, an
+   apply that dies costs a person. The scan worker may still answer from the local or
+   shared question cache with no browser at all; anything needing a real page load is
+   **deferred** (retried in `SCAN_DEFER_MS`, default 5 minutes) for a capable host.
    `WORKER_ENABLED=false` remains a manual opt-out, but it can only pin a host
    **off** — it can never assert a capability the host does not have.
-5. **A machine's problem stays the machine's problem.** If a run dies on an
-   unavailable browser it is handed back `APPLYING → QUEUED` and **parked** for
-   `APPLY_DEFER_MS` (default 5 min) — the host's error is not stored as the
-   applicant's failure, a finished submission is never reopened, and the same
-   dead host cannot re-claim the row every poll tick. A CA's APPLY or a DEV's
-   Retry clears that pause immediately: a human pressing the button means now.
+5. **A machine's problem stays the machine's problem.** An application is only ever
+   FAILED on evidence the **form was reached**. A run that dies on an unavailable
+   browser, or is killed (or exits silently) without ever writing a result, is handed
+   back `APPLYING → QUEUED` and **parked** for `APPLY_DEFER_MS` (default 5 min): the
+   host's error is not stored as the applicant's failure, a finished submission is
+   never reopened, and the same dead host cannot re-claim the row every poll tick —
+   three simultaneous Chromiums on a 512MB container killed one run six seconds in
+   and it had been filed as the applicant's FAILED application. When a run *did*
+   reach the page but left no result, its own last printed line is recorded as the
+   reason instead of "Engine process exited without a result". A CA's APPLY or a
+   DEV's Retry clears the pause immediately: a human pressing the button means now.
 6. **Provenance is visible.** `link_scan_jobs.scan_via` records whether a
    `✓ scanned` came from `local-cache`, `shared-cache` or a real `browser` scan,
    and the DEV pane shows the host's browser capability per mode, which launch
@@ -248,7 +259,7 @@ better than a deploy that does not start. Skip it with
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 97 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 115 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers
 ```
 

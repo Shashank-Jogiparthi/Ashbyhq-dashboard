@@ -19,6 +19,11 @@
         gate answers SEPARATELY for apply and scan, because those are different
         machines in practice, and how an APPLY launches is decided once for the
         whole platform by core/apply-mode.js.
+     1c. the host's BUDGET and the fault split: browsers at once are counted
+        against the memory actually available (core/host-capacity.js), and a run
+        that was killed or said nothing without ever writing a result is a HOST
+        fault handed back to the queue, not an applicant's FAILED record
+        (core/host-fault.js).
      2. an applicant is addressable by AWL-ID alone (profile present /
         needs a fetch);
      3. the post-SUCCESS privacy erase removes the form data and keeps
@@ -47,6 +52,8 @@ import {
 import { scanStateForUrl } from '../worker/link-scanner.js';
 import { browserState, canDriveBrowsers } from '../core/browser-check.js';
 import { applyLaunchMode } from '../core/apply-mode.js';
+import { hostMemory, browserCapacity, effectiveLimit } from '../core/host-capacity.js';
+import { classifyRunFault } from '../core/host-fault.js';
 import { judgeScan, inventoryIsResidue } from '../core/scan-verdict.js';
 import { buildReviewQuestions, questionIsOptional } from '../draft-service.js';
 import { fieldKeyOf } from '../../field-applier.js';
@@ -302,6 +309,61 @@ async function verifyCapabilityGate() {
       && !/APPLY_HEADLESS[^\n]*===\s*'true'/.test(runnerSrc));
   check('the worker hands the resolved mode to the engine it spawns (the engine itself is never edited)',
     /APPLY_HEADLESS:\s*String\(HEADLESS_APPLY\)/.test(runnerSrc));
+
+  // ---- 1c. how many browsers a host may hold, and whose fault a death is ----
+  // Three applications were claimed by ONE poll tick on the Railway container and
+  // launched together; the Drata run died six seconds in - no result file, no
+  // screenshot - while its two siblings submitted normally. The kernel chose the
+  // victim and the applicant got the record: FAILED, "Engine process exited
+  // without a result". Two rules close that: count browsers against the memory
+  // that is really available, and never file a failure the form itself never
+  // produced.
+  const MB = 1024 * 1024;
+  const cap = (mb, env = {}) => browserCapacity({ env, memory: { bytes: mb * MB, source: 'test' } });
+  check('a 512MB container is allowed ONE browser, not four',
+    cap(512).capacity === 1, cap(512).reason);
+  check('a 2GB container fits four', cap(2048).capacity === 4);
+  check('a host smaller than one browser still gets one (never zero - that would freeze the queue)',
+    cap(200).capacity === 1 && cap(0).capacity === 1);
+  check('APPLY_BROWSER_MB re-prices a browser on a host that needs it',
+    cap(1024, { APPLY_BROWSER_MB: '1024' }).capacity === 1);
+  check('MAX_BROWSERS overrides the measurement in both directions',
+    cap(8192, { MAX_BROWSERS: '2' }).capacity === 2 && cap(512, { MAX_BROWSERS: '8' }).capacity === 8);
+  check('the measurement reads a cgroup limit before os.totalmem, which reports the HOST node',
+    /HOST_MEM_MB/.test(hostMemory({ HOST_MEM_MB: '600' }).source) && hostMemory({ HOST_MEM_MB: '600' }).bytes === 600 * MB
+      && /cgroup|totalmem/.test(hostMemory({}).source));
+  check('an explicit cap is honoured but never above what the host holds',
+    effectiveLimit(4, cap(512)).limit === 1 && effectiveLimit(4, cap(512)).capped === true);
+  check('"unlimited" means as many as fit, not as many as exist',
+    effectiveLimit(Infinity, cap(1024)).limit === 2);
+  check('a laptop with room to spare is not slowed down by a container rule',
+    effectiveLimit(4, cap(16384)).limit === 4 && effectiveLimit(4, cap(16384)).capped === false);
+  check('the real host reports a capacity of at least one browser',
+    browserCapacity().capacity >= 1, browserCapacity().reason);
+
+  const killed = { hasResult: false, exitSignal: 'SIGKILL', exitCode: null, output: '' };
+  check('a run KILLED with no result is the machine\'s fault, not the applicant\'s',
+    classifyRunFault(killed).hostFault === true
+      && /SIGKILL/.test(classifyRunFault(killed).reason) && /memory/i.test(classifyRunFault(killed).reason),
+    classifyRunFault(killed).reason);
+  check('exit 137 (the OOM kill through a shell) reads the same way',
+    classifyRunFault({ hasResult: false, exitCode: 137, output: 'half a line' }).hostFault === true);
+  check('a process that vanished without a word decided nothing either',
+    classifyRunFault({ hasResult: false, exitCode: 0, output: '   ' }).hostFault === true);
+  check('a missing browser is still a host fault (the original bug class)',
+    classifyRunFault({ hasResult: false, exitCode: 1, output: "Fatal error: browserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/chromium-1243/chrome" }).hostFault === true);
+  check('...even when the engine also wrote a result, but never after a SUCCESS',
+    classifyRunFault({ hasResult: true, outcome: 'failed', exitCode: 1, output: 'browserType.launch: Failed to launch' }).hostFault === true
+      && classifyRunFault({ hasResult: true, outcome: 'success', exitCode: 1, output: 'browserType.launch: x' }).hostFault === false);
+  check('a real run that printed its own fatal error stays the applicant\'s FAILED - with the ERROR, not the placeholder',
+    classifyRunFault({ hasResult: false, outcome: 'failed', exitCode: 1, output: 'line one\nFatal error: page.goto: net::ERR_NAME_NOT_RESOLVED' }).hostFault === false
+      && /ERR_NAME_NOT_RESOLVED/.test(classifyRunFault({ hasResult: false, outcome: 'failed', exitCode: 1, output: 'Fatal error: page.goto: net::ERR_NAME_NOT_RESOLVED' }).reason));
+  check('a judged form keeps its banner as the reason',
+    classifyRunFault({ hasResult: true, outcome: 'failed', exitCode: 0, output: 'Validation error found' }).reason === '');
+  check('the worker uses that classifier and keeps the exit code as evidence',
+    /classifyRunFault\(/.test(runnerSrc) && /child\.on\('close', \(code, signal\)/.test(runnerSrc)
+      && !/const NO_BROWSER_SIG/.test(runnerSrc),
+    'the signature lives in core/host-fault.js');
 
   // The verdict rules (pure): the shapes that used to be cached and published.
   const goodPosting = { h1: 'Staff Data Engineer', docTitle: 'Staff Data Engineer - Acme', jobTitle: '', headingAttr: '' };
