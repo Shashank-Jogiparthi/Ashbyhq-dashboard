@@ -28,6 +28,7 @@ import { browserState, checkBrowser } from '../core/browser-check.js';
 import { applyLaunchMode, applyLaunchLabel } from '../core/apply-mode.js';
 import { classifyRunFault } from '../core/host-fault.js';
 import { readUnknownBanner } from '../core/submission-banner.js';
+import { classifyMissingResume } from '../core/applicant-source.js';
 import { browserCapacity, effectiveLimit } from '../core/host-capacity.js';
 import {
   listQueuedForWorker, claimForRun, finishRun, markRunCrash,
@@ -199,8 +200,10 @@ async function launch(app) {
 
   // A previous SUCCESS (or a fresh assignment the CRM had not been read for)
   // can leave this applicant with no snapshot. Fix that before spending a
-  // browser: the AWL-ID alone resolves everything from the two CRM tables.
-  await ensureApplicantSnapshot(app);
+  // browser: the AWL-ID alone resolves everything from the two CRM tables. What
+  // the attempt learned is kept, because a missing resume afterwards needs to
+  // say which of three things is missing (core/applicant-source.js).
+  const snapshot = await ensureApplicantSnapshot(app);
 
   const profileFile = path.join(runDir, 'profile.json');
   try {
@@ -335,7 +338,29 @@ async function launch(app) {
       resumePath = await resolveResume(app.resume_address, runDir);
     } catch (err) {
       active.delete(app.id);
-      try { await markRunCrash(app.id, `Resume unavailable: ${err.message}`); } catch { /* ignore */ }
+      // "No resume address" is not one fact, it is three, and only two of them
+      // belong to the applicant. AWL-25663 was filed FAILED for having no resume
+      // while client_profiles did have it, because the host that ran it has no
+      // PGHOST and therefore could never have read the CRM.
+      const missing = /no resume address/i.test(String(err.message || ''));
+      const verdict = missing
+        ? classifyMissingResume({
+          configured: snapshot.configured, seen: snapshot.seen,
+          syncError: snapshot.error, awlId: app.awl_id
+        })
+        : { hostFault: false, reason: `Resume unavailable: ${err.message}` };
+      try {
+        if (verdict.hostFault) {
+          await handBackToQueue(app.id, verdict.reason.slice(0, 300));
+          await logEvent(app.id, 'run_deferred_no_crm', 'worker', { run_id: runId, host: browserState('apply').host, error: verdict.reason.slice(0, 300) });
+          console.log(`[run ${app.id}] this host cannot supply the resume - application handed back to the queue: ${verdict.reason.slice(0, 160)}`);
+        } else {
+          await markRunCrash(app.id, verdict.reason.slice(0, 300));
+        }
+      } catch { /* ignore */ }
+      // The run dir already holds profile.json (applicant data) by this point, so
+      // it must be erased on this path too - it was leaking on every resume fail.
+      cleanupRun(runDir);
       return;
     }
 
@@ -372,22 +397,31 @@ async function launch(app) {
 /* ------------------------------ helpers ----------------------------- */
 
 // Load the merged CRM profile into `app` in place when it is missing/empty.
-// Never throws: with no CRM configured the run proceeds on whatever is stored.
+// Never throws. Returns what it learned - whether this host has a connector at
+// all, how many CRM rows the AWL-ID matched, and any error - because the caller
+// has to tell "this machine may not read the CRM" apart from "the CRM has
+// nothing on this person". Those are different failures with different owners.
 async function ensureApplicantSnapshot(app) {
-  const raw = String(app.profile_json || '').trim();
-  if (raw && raw !== '{}') return false;
+  const info = { configured: false, seen: null, error: '' };
+  let connector = null;
   try {
-    const { isConfigured, syncApplicantByAwl } = await import('../connector/applicant-db.js');
-    if (!isConfigured()) return false;
-    await syncApplicantByAwl(app.awl_id);
+    connector = await import('../connector/applicant-db.js');
+    info.configured = Boolean(connector.isConfigured());
+  } catch { info.configured = false; }
+  const raw = String(app.profile_json || '').trim();
+  if (!info.configured || (raw && raw !== '{}')) return info;
+  try {
+    const summary = await connector.syncApplicantByAwl(app.awl_id);
+    info.seen = Number(summary?.seen ?? 0);
     const fresh = await getApplicationById(app.id);
     if (fresh) Object.assign(app, fresh);
-    await logEvent(app.id, 'applicant_profile_refetched', 'worker', { awl_id: app.awl_id });
-    return true;
+    await logEvent(app.id, 'applicant_profile_refetched', 'worker', { awl_id: app.awl_id, seen: info.seen });
   } catch (err) {
-    await logEvent(app.id, 'applicant_profile_refetch_failed', 'worker', { error: String(err.message || err).slice(0, 200) });
-    return false;
+    info.error = String(err.message || err).slice(0, 200);
+    await logEvent(app.id, 'applicant_profile_refetch_failed', 'worker', { error: info.error });
+    return info;
   }
+  return info;
 }
 
 // Post-SUCCESS erase. Answers for this (applicant, link) always go; the shared

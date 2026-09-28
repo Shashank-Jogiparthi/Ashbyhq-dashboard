@@ -25,7 +25,10 @@
         fault handed back to the queue, not an applicant's FAILED record
         (core/host-fault.js). An unclear post-submit page is read for what Ashby
         actually said, so a spam rejection is named instead of filed as our not
-        knowing (core/submission-banner.js).
+        knowing (core/submission-banner.js). And "no resume address" is split
+        into its three possible owners - a host with no CRM connector, an AWL-ID
+        the CRM does not know, or a CRM row with no link in it - so the machine
+        that could not look is never blamed on the person (core/applicant-source.js).
      2. an applicant is addressable by AWL-ID alone (profile present /
         needs a fetch);
      3. the post-SUCCESS privacy erase removes the form data and keeps
@@ -57,6 +60,7 @@ import { applyLaunchMode } from '../core/apply-mode.js';
 import { hostMemory, browserCapacity, effectiveLimit } from '../core/host-capacity.js';
 import { classifyRunFault } from '../core/host-fault.js';
 import { readUnknownBanner } from '../core/submission-banner.js';
+import { classifyMissingResume, noConnectorHere } from '../core/applicant-source.js';
 import { judgeScan, inventoryIsResidue } from '../core/scan-verdict.js';
 import { buildReviewQuestions, questionIsOptional } from '../draft-service.js';
 import { fieldKeyOf } from '../../field-applier.js';
@@ -73,6 +77,7 @@ const SCAN_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'sca
 const PROBE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'core', 'browser-probe.js');
 const RUNNER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'runner.js');
 const STORE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'db', 'store.js');
+const SERVER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.js');
 function runScanScript(url, env) {
   return runChild(SCAN_SCRIPT, [url], env);
 }
@@ -404,6 +409,33 @@ async function verifyCapabilityGate() {
   check('starts are staggered on every host, capped or unlimited',
     /const START_SPACING_MS = Math\.max\(0, Number\(process\.env\.RUN_START_SPACING_MS \?\? 1500\)\)/.test(runnerSrc)
       && !/WANTED_MAX === Infinity\s*\n?\s*\?\s*0/.test(runnerSrc));
+
+  // "Resume unavailable: no resume address" was one sentence covering three
+  // different problems, and the one that was a MACHINE fault (no PGHOST on the
+  // host that ran it, while client_profiles had the resume all along) was filed
+  // against the applicant. Each branch now has its own owner.
+  check('a host with no CRM connector has a missing resume to itself - and it is the machine\'s',
+    classifyMissingResume({ configured: false, awlId: 'AWL-25663' }).hostFault === true
+    && /PGHOST/.test(classifyMissingResume({ configured: false, awlId: 'AWL-25663' }).reason)
+    && /another host/i.test(classifyMissingResume({ configured: false, awlId: 'AWL-25663' }).reason));
+  check('a CRM read that threw is the same kind of fault (nothing was fetched)',
+    classifyMissingResume({ configured: true, syncError: 'connection timed out' }).hostFault === true
+    && /timed out/.test(classifyMissingResume({ configured: true, syncError: 'connection timed out' }).reason));
+  check('an AWL-ID the CRM genuinely does not know is NOT a host fault',
+    classifyMissingResume({ configured: true, seen: 0, awlId: 'AWL-9' }).hostFault === false
+    && /no client_profiles/.test(classifyMissingResume({ configured: true, seen: 0, awlId: 'AWL-9' }).reason));
+  check('a CRM row with no resume link names the columns to fix',
+    classifyMissingResume({ configured: true, seen: 1, awlId: 'AWL-9' }).hostFault === false
+    && /resume_url/.test(classifyMissingResume({ configured: true, seen: 1, awlId: 'AWL-9' }).reason));
+  check('"no connector here" matches the connector\'s own idea of configured',
+    noConnectorHere({}) === true && noConnectorHere({ PGHOST: 'h' }) === false
+    && noConnectorHere({ AZURE_PG_HOST: 'h' }) === false
+    && noConnectorHere({ PG_CONNECTION_STRING: 'postgres://x' }) === false);
+  check('the worker asks that classifier instead of blaming the applicant, and erases the run dir it left',
+    /classifyMissingResume\(\{/.test(runnerSrc) && /run_deferred_no_crm/.test(runnerSrc)
+      && /cleanupRun\(runDir\);\s*\n\s*return;/.test(runnerSrc));
+  check('an ingest records whether its own host could read the CRM at all',
+    /connector_configured: connectorConfigured\(\)/.test(fs.readFileSync(SERVER_SCRIPT, 'utf8')));
 
   // The verdict rules (pure): the shapes that used to be cached and published.
   const goodPosting = { h1: 'Staff Data Engineer', docTitle: 'Staff Data Engineer - Acme', jobTitle: '', headingAttr: '' };

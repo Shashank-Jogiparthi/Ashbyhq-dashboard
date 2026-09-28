@@ -1049,7 +1049,7 @@ function chunkLinkText(text) {
 async function ingestLinkText(text, status) {
   const chunks = chunkLinkText(text);
   if (!chunks.length) return 'Nothing to send — every line was empty.';
-  const total = { accepted: 0, rejected: [], malformed: [], malformedCount: 0, placeholders: [], scanned: 0 };
+  const total = { accepted: 0, rejected: [], malformed: [], malformedCount: 0, placeholders: [], scanned: 0, connector: true };
   for (let i = 0; i < chunks.length; i++) {
     // Re-resolved every round: the refresh at the end of an ingest rebuilds the
     // pane, and a progress line written into a detached node is never seen.
@@ -1061,6 +1061,7 @@ async function ingestLinkText(text, status) {
     total.malformed.push(...(res.malformed || []));
     total.malformedCount += Number(res.malformed_count || 0);
     total.placeholders.push(...(res.placeholders || []));
+    if (res.connector === false) total.connector = false;
     total.scanned += (res.scan?.queued || []).length;
   }
   const bits = [`<b>added ${total.accepted} assignment(s) to ashby_joblinks</b>`];
@@ -1068,9 +1069,15 @@ async function ingestLinkText(text, status) {
   else bits.push('every link already had a cached question inventory');
   const uniqPh = [...new Set(total.placeholders)];
   if (uniqPh.length) {
-    bits.push(`<br><b>${uniqPh.length} AWL-ID(s) had no CRM record, so a placeholder applicant was created</b> `
-      + `<span class="mono small">${esc(uniqPh.slice(0, 8).join(', '))}${uniqPh.length > 8 ? '…' : ''}</span> `
-      + `— they will pick up their real details on the next sync, and until then the review pane asks the CA everything.`);
+    const ids = `<span class="mono small">${esc(uniqPh.slice(0, 8).join(', '))}${uniqPh.length > 8 ? '…' : ''}</span>`;
+    bits.push(total.connector === false
+      // The honest version of the usual promise: on a host with no PGHOST there
+      // is no later sync to wait for, and a run here can never find a resume.
+      ? `<br><b>${uniqPh.length} AWL-ID(s) were created as placeholders and THIS HOST HAS NO CRM CONNECTOR</b> ${ids} `
+        + `— it cannot read client_profiles at all, so they will stay nameless here and any apply will fail for want of a resume. `
+        + `Set PGHOST/PGUSER/PGPASSWORD/PGDATABASE on this service, or ingest and run them from a host that has them.`
+      : `<br><b>${uniqPh.length} AWL-ID(s) had no CRM record, so a placeholder applicant was created</b> ${ids} `
+        + `— they will pick up their real details on the next sync, and until then the review pane asks the CA everything.`);
   }
   if (total.rejected.length) {
     bits.push(`<br>rejected ${total.rejected.length}: ${esc(total.rejected.slice(0, 5).map((r) => `${r.awlId} — ${r.error}`).join('; '))}`);

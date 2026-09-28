@@ -690,7 +690,10 @@ app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async 
         awlId, fullName: awlId, email: '', phone: '', resumeAddress: '', profileJson: '{}', extId: null, opsId: null
       })).applicant;
       placeholders.push(awlId);
-      await logEvent(null, 'applicant_placeholder_created', 'dev', { awl_id: awlId, source: 'link_ingest' });
+      // connector_configured is the difference between "the CRM does not know
+      // this person yet" and "this host was never allowed to look". AWL-25663
+      // was a shell of the second kind, and the feed could not tell them apart.
+      await logEvent(null, 'applicant_placeholder_created', 'dev', { awl_id: awlId, source: 'link_ingest', connector_configured: connectorConfigured() });
     }
     // 1. remember the assignment in the CRM map (awl_id -> job_links[])
     const stored = await appendJobLink(awlId, url);
@@ -715,6 +718,10 @@ app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async 
   return {
     accepted: accepted.filter((a) => !a.error), rejected: [...rejected, ...failed],
     links: accepted.map((a) => a.url), profiles, scan,
+    // Whether THIS host can read the CRM at all. False means every AWL-ID here
+    // became a shell and no run on it can fetch a resume, so the UI has to say
+    // that instead of promising a later sync.
+    connector: connectorConfigured(),
     // Rows the parser could not read as a pair, plus the AWL-IDs it had to
     // create a shell for - both need to be visible, never silently dropped.
     placeholders: [...new Set(placeholders)],
