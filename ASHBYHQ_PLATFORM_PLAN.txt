@@ -694,15 +694,18 @@ THE INCIDENT THIS EXISTS FOR
       served as the truth to every later applicant everywhere.
 
 WHAT  core/browser-probe.js + core/browser-check.js
-HOW   the probe is a child process that mirrors the ENGINE's own
-      resolution order (CHROME_PATH -> installed Chrome on Windows
-      -> Playwright's bundled Chromium), launches headless, opens
+HOW   the probe is a child process, run ONCE PER MODE (argv 'apply' or
+      'scan'), that mirrors the ENGINE's own search for a binary
+      (CHROME_PATH -> installed Chrome on Windows
+      -> Playwright's bundled Chromium) and that mode's own launch -
+      HEADED for applies unless APPLY_HEADLESS/HEADLESS=true, headless for
+      scans unless SCAN_HEADLESS=false, --start-maximized and all. It opens
       about:blank and closes. It answers on ONE tab-separated
       stdout line prefixed BROWSER_PROBE (tabs because Windows
       paths contain spaces; the prefix because dotenv prints an
       "injected env" banner on the same stdout), tagged
       OK / MISSING / NOLOAD / NOEXEC / LAUNCHFAIL. browser-check.js
-      caches that verdict in-process, loads .env for the child, and
+      caches that verdict per mode, loads .env for the child, and
       never touches the network.
 WHY   existsSync() is not the truth: the incident was exactly
       "the host looked capable and was not", and the next variant
@@ -730,6 +733,47 @@ THE GATE IN THE TWO WORKERS
   browser is handed back (handBackToQueue: APPLYING -> QUEUED, the
   machine's error is NOT stored as the applicant's fail_reason, a
   application.handback event is logged). SUCCESS is never re-opened.
+
+  v3.3a - THE GATE HAD THE SAME BUG IT WAS WRITTEN TO CATCH
+  The first version launched ONE probe, headless, and shared its answer
+  between both workers. It went live, called itself ready on Railway, and
+  destroyed the two applications it was meant to protect - because the
+  engine does not apply headless: line ~647 launches HEADED unless
+  APPLY_HEADLESS/HEADLESS=true (a real window is the best signal available
+  to Ashby's anti-spam filter), while the scan path (line ~805) is headless
+  by default. On a container with no display those are two different
+  questions with two different answers, and the headed one fails with
+     browserType.launch: Target page, context or browser has been closed
+  Worse, the hand-back put the row straight back into a QUEUED pool that the
+  same host re-claimed on the next poll tick: 56 claim/launch/hand-back
+  cycles in eight minutes on one AWL-ID, 62 attempts on each application and
+  ~580 event rows, none of which was ever the applicant's fault.
+  Both halves are now structural:
+   • TWO VERDICTS. The probe takes its mode from argv ('apply' | 'scan',
+     unknown = 'apply', the destructive default) and mirrors that mode's
+     headless flag AND its launch args (--start-maximized included, since
+     that is exactly what a headless-only probe never exercises). browser-
+     check.js caches one state per mode; browserState(mode) /
+     canDriveBrowsers(mode) / checkBrowser({mode}) are the API, and 'apply'
+     is the default so a call site that forgets to say gets the STRICTER
+     answer. The apply worker gates on 'apply', the scan worker on 'scan',
+     and server.js measures both at boot (sequentially - two cold browser
+     launches on a small host compete for memory). A display-less container
+     is therefore a legitimate SCANNER and an illegitimate APPLICATOR, and
+     says so separately in the DEV pane.
+   • A HANDBACK IS A PAUSE, NOT A RE-QUEUE. applications.next_attempt_at
+     (both schemas + idempotent ALTER) is set to now + APPLY_DEFER_MS
+     (default 5m) by handBackToQueue, filtered out of listQueuedForWorker()
+     AND refused by the atomic claim in claimForRun() itself (a poll that
+     read the row before the pause existed must still lose the race).
+     applyApplication() and devRequeue() clear it: a human clicking APPLY or
+     Retry means NOW. NULL means due, so nothing about a normal run changes.
+  What this means operationally: with no display, Railway serves the API,
+  the shared cache and headless scans, and LEAVES APPLY RUNS for a host that
+  can open a window - the operator's machine, or a container that sets
+  APPLY_HEADLESS=true (the engine's own comment is honest about that
+  tradeoff: stealth is wired either way, but a datacenter IP is not masked),
+  or one with a virtual display (xvfb). The queue waits; it no longer burns.
 
 PROVENANCE + JUNK REFUSAL
   link_scan_jobs.scan_via (local-cache | shared-cache | browser,
@@ -769,12 +813,18 @@ BUILD-TIME BROWSER (scripts/ensure-browser.js, repo root)
   APPLYWIZZ_SKIP_BROWSER_INSTALL=true. It is deliberately not in
   postinstall, so a local npm install never pulls ~150MB unasked.
 
-VERIFICATION (npm run verify:flow, now 80 assertions)
+VERIFICATION (npm run verify:flow, now 88 assertions)
   new verifyCapabilityGate() (fail-closed default, verdict rules, a
   REAL cache-only scan-link.js spawn with SCAN_NO_BROWSER=true that
   must exit 3 without launching, the defer/attempt-refund/
   next_attempt_at bookkeeping, scan_via written then cleared) and
-  verifyHandBack(). Verifier hygiene on a shared DB learned the hard
+  verifyHandBack(). v3.3a added the mode split - separate unchecked
+  verdicts for apply and scan, both failing closed, and the probe
+  driven as a real child with a bogus CHROME_PATH in EACH mode so
+  argv wiring is proven (it must answer MISSING, never OK) - plus
+  the brake: a handed-back row is parked, is absent from
+  listQueuedForWorker(), is refused by claimForRun() while parked, and
+  is due again the moment the pause is cleared. Verifier hygiene on a shared DB learned the hard
   way: claim BY URL (claimNextScanJob({claimer, now, url}) - a
   generic "next due row" claim re-armed other people's work),
   snapshot/restore foreign FAILED rows around the global requeue
@@ -782,15 +832,21 @@ VERIFICATION (npm run verify:flow, now 80 assertions)
   live CA traffic raced the checks, so every feed assertion is
   scoped to its own application_id.
 
-RESTRICTIONS the gate is per-host and re-measured, not a config
-     switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
+RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
+     config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
      operator override, but it can only pin a host OFF, never claim
      capability it does not have.
+     A verdict is never shared between modes. 'apply' answers the headed
+     question, 'scan' the headless one; a host may legitimately hold one and
+     fail the other (that is exactly what a container is).
      A browserless host answers cache hits only; anything needing a
      page load defers quietly for a capable host.
      Refusal is per-SCAN: a genuinely single-question application
      form is fine as long as its URL ends in /application.
      scan_via is provenance for humans, not a security property.
+     The apply backoff is a host-fault brake only - it never delays a CA's
+     APPLY or a DEV Retry (both clear next_attempt_at), and attempts on
+     applications stay a counter, not a cap.
 
 END OF CURRENT-STATE DOC (v3.3) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

@@ -184,26 +184,43 @@ cannot drive a browser used to claim real work and file its own missing binary a
 other people's failures (links "No scan output produced", applicants
 "Engine process exited without a result"). That class is closed:
 
-1. **Measure, don't assume.** On boot the host launches a headless browser, opens
+1. **Measure, don't assume.** On boot the host launches a real browser, opens
    `about:blank` and remembers the verdict (`core/browser-probe.js` /
    `core/browser-check.js`). The check mirrors the engine's own search:
    `CHROME_PATH` → installed Chrome → Playwright's bundled Chromium.
-2. **No browser, no claiming.** The apply worker will not claim a run. The scan
+2. **One verdict per MODE — apply and scan are different machines.** The engine
+   opens a **headed** window for an application (best signal available to Ashby's
+   anti-spam filter) and a **headless** page for a scan, so each is measured in
+   its own mode. A container with no display is a legitimate scanner and *not* a
+   legitimate applicator; saying one "browser ready" for both is how a deploy
+   once claimed real applications and lost them at `browserType.launch`.
+3. **No browser, no claiming.** The apply worker will not claim a run. The scan
    worker may still answer from the local/shared question cache; anything that
    needs a real page load is **deferred** (attempt refunded, retried in
    `SCAN_DEFER_MS`, default 5 minutes) for a browser-capable host.
    `WORKER_ENABLED=false` remains a manual opt-out, but it can only pin a host
    **off** — it can never assert a capability the host does not have.
-3. **A machine's problem stays the machine's problem.** If a run dies on a
-   missing browser it is handed back `APPLYING → QUEUED`, the host's error is not
-   stored as the applicant's failure, and a finished submission is never reopened.
-4. **Provenance is visible.** `link_scan_jobs.scan_via` records whether a
+4. **A machine's problem stays the machine's problem.** If a run dies on an
+   unavailable browser it is handed back `APPLYING → QUEUED` and **parked** for
+   `APPLY_DEFER_MS` (default 5 min) — the host's error is not stored as the
+   applicant's failure, a finished submission is never reopened, and the same
+   dead host cannot re-claim the row every poll tick. A CA's APPLY or a DEV's
+   Retry clears that pause immediately: a human pressing the button means now.
+5. **Provenance is visible.** `link_scan_jobs.scan_via` records whether a
    `✓ scanned` came from `local-cache`, `shared-cache` or a real `browser` scan,
-   and the DEV pane shows the host's browser capability plus that tag — so an
-   8-second cache answer can't be mistaken for a page load.
-5. **Junk never lands.** A scan whose page reads like a listing/404, or that
+   and the DEV pane shows the host's browser capability per mode plus that tag —
+   so an 8-second cache answer can't be mistaken for a page load.
+6. **Junk never lands.** A scan whose page reads like a listing/404, or that
    returns one field on a non-`/application` URL, is refused: nothing stored,
    nothing published to the shared cache.
+
+**So where do applies run?** On a host that can open a window — normally your
+own machine with the dashboard running (`npm start`, worker enabled). A
+container can take over the submissions too only if it either sets
+`APPLY_HEADLESS=true` (works, but the datacenter IP is not masked, so treat it
+as a throughput tradeoff) or provides a virtual display (xvfb). Until then it
+serves the API, the shared question cache and the headless scans, and leaves
+QUEUED applications alone — waiting, not failing.
 
 **Build command** (`railway.json`) is now:
 
@@ -219,8 +236,8 @@ better than a deploy that does not start. Skip it with
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 80 assertions: gate, defer/refund, hand-back, cache
-                      # provenance, junk refusal, publish path, workers
+npm run verify:flow   # 88 assertions: gate per mode, defer/refund, hand-back +
+                      # park, cache provenance, junk refusal, publish path, workers
 ```
 
 ---
