@@ -850,6 +850,38 @@ v3.3c - THE HOST'S BUDGET, AND WHO PAYS FOR A DEATH
   estimate is deliberately conservative and the classifier is the backstop - a
   death without evidence costs a wait, not an applicant.
 
+v3.3d - WHAT ASHBY ACTUALLY SAID (core/submission-banner.js)
+  Those same three Railway runs also answered the question "so why did only one
+  go through": two of them came back with Ashby's red "We couldn't submit your
+  application - Your application submission was flagged as possible spam" box
+  (the operator's screenshots of Render and mdCalc), one with the green
+  Success box (FutureFit). Nothing in the platform said so. The engine only
+  recognises two acknowledgements - success and missing-fields - and stores
+  every other page as 'unknown' TOGETHER WITH the visible page text, which the
+  worker then dropped on the floor: the run was filed PENDING "Outcome
+  unclear" and finishRun() nulled fail_reason for anything that was not a
+  failure, so the row showed no explanation at all and a human had to open a
+  screenshot to learn what the page had already said in words.
+  Three changes, none of them in the engine:
+   - core/submission-banner.js reads an unclear post-submit page's own banner
+     and names the outcome ("flagged as possible spam - NOT submitted ... this
+     host's network is what Ashby distrusted"), quoting at most 160 characters
+     of it. An unrecognised page stays "Outcome unclear": guessing that a
+     submission worked is worse than admitting we cannot read it.
+   - worker/runner.js applies it to the 'unknown' branch only, so a spam-flagged
+     run stays PENDING for a human (never SUCCESS, never the applicant's
+     FAILED) and is logged as run_spam_flagged rather than run_pending. It is
+     deliberately NOT re-queued by machine: a retry from the same IP gets
+     flagged again and teaches Ashby to distrust that address harder.
+   - db/store.js finishRun() now keeps the reason on a PENDING row.
+  Also fixed on the way: RUN_START_SPACING_MS was switched off exactly when it
+  was needed - the ternary was inverted against its own comment, so an
+  UNLIMITED worker launched the entire queue inside one second (three
+  simultaneous identical submissions from one datacenter IP is precisely the
+  shape that gets flagged). Starts are now staggered on every host, capped or
+  not, and the comment says what that is for: memory and shape, not
+  deliverability. No amount of spacing makes a datacenter IP look residential.
+
 PROVENANCE + JUNK REFUSAL
   link_scan_jobs.scan_via (local-cache | shared-cache | browser,
   NULL on failure) makes an 8s "✓ scanned" legible as a cache answer
@@ -888,7 +920,7 @@ BUILD-TIME BROWSER (scripts/ensure-browser.js, repo root)
   APPLYWIZZ_SKIP_BROWSER_INSTALL=true. It is deliberately not in
   postinstall, so a local npm install never pulls ~150MB unasked.
 
-VERIFICATION (npm run verify:flow, now 115 assertions)
+VERIFICATION (npm run verify:flow, now 122 assertions)
   new verifyCapabilityGate() (fail-closed default, verdict rules, a
   REAL cache-only scan-link.js spawn with SCAN_NO_BROWSER=true that
   must exit 3 without launching, the defer/attempt-refund/
@@ -911,7 +943,12 @@ VERIFICATION (npm run verify:flow, now 115 assertions)
   fault split (killed with no result, exit 137, silent exit, missing browser,
   never after a SUCCESS, a printed fatal error stays the applicant's FAILED with
   the real line as its reason) plus source checks that the worker uses the
-  classifier and keeps exit code/signal as evidence. Verifier hygiene on a shared DB learned the hard
+  classifier and keeps exit code/signal as evidence. v3.3d asserts the banner
+  reader against Ashby's real spam text (named, blamed on the right party,
+  bounded so a whole page cannot be pasted into a reason, and silent on a page
+  it cannot read), that the worker consults it before calling a run unclear,
+  that a PENDING row keeps its reason, and that starts are staggered whether or
+  not a cap exists. Verifier hygiene on a shared DB learned the hard
   way: claim BY URL (claimNextScanJob({claimer, now, url}) - a
   generic "next due row" claim re-armed other people's work),
   snapshot/restore foreign FAILED rows around the global requeue
@@ -940,6 +977,11 @@ RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      The apply backoff is a host-fault brake only - it never delays a CA's
      APPLY or a DEV Retry (both clear next_attempt_at), and attempts on
      applications stay a counter, not a cap.
+     A spam-flagged submission is named and left PENDING for a human; nothing
+     retries it automatically, because a second attempt from the same network
+     is the same answer plus a worse reputation. Where deliverability matters
+     more than throughput, run applies from a residential host
+     (WORKER_ENABLED=false on the container) - see v3.3d.
 
-END OF CURRENT-STATE DOC (v3.3c) - previous v2 plan superseded; base
+END OF CURRENT-STATE DOC (v3.3d) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

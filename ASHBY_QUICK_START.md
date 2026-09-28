@@ -232,18 +232,34 @@ other people's failures (links "No scan output produced", applicants
 7. **Junk never lands.** A scan whose page reads like a listing/404, or that
    returns one field on a non-`/application` URL, is refused: nothing stored,
    nothing published to the shared cache.
+8. **Ashby's own words are read, not shrugged at.** The engine only recognises two
+   post-submit acknowledgements (success, missing fields) and stores everything else
+   as `unknown` *with the page text*. `core/submission-banner.js` reads that text, so
+   the red "flagged as possible spam" box is now recorded as exactly that — *not
+   submitted, this host's network is what Ashby distrusted* — instead of PENDING
+   "Outcome unclear" with an empty reason column. It stays PENDING for a human and is
+   **never** auto-retried: a second attempt from the same IP is the same answer with a
+   worse reputation. A page the reader cannot recognise still says "unclear", because
+   guessing a submission worked is worse than admitting we cannot read it.
 
 **So where do applies run?** On any host that can launch a browser. Your own
 machine opens a real window (`npm start`, worker enabled); a Railway container
 submits **headlessly**, because it has no display and the rule above says so —
 no variable has to be set, and a rebuild cannot lose the setting. Both hosts poll
-the **same** queue, so whichever is free takes the row. Headless from a
-datacenter IP is a throughput tradeoff (the stealth wiring does not mask the IP),
-so for submissions where the visible window matters, point `WORKER_ENABLED=false`
-at the container and let the laptop take them; set `APPLY_HEADLESS=false` with a
-real display or xvfb if you want headed runs on a server. Either way a host that
-cannot produce the mode it asked for measures itself as **unable to apply** and
-leaves QUEUED rows alone instead of faking a READY.
+the **same** queue, so whichever is free takes the row.
+
+**Headless from a datacenter IP is the one thing that has cost real submissions.**
+When Railway first applied, one poll tick launched three browsers in the same second
+and Ashby flagged two of the three as possible spam (the third went through). The
+stealth wiring hides `navigator.webdriver` and the UA; it does not hide the IP, and
+three simultaneous identical submissions from one address is the shape the filter
+reports on. Starts are staggered on every host now (`RUN_START_SPACING_MS`, default
+1500ms — previously this pacing was switched off exactly when it was needed), but no
+spacing makes a datacenter look residential: where deliverability matters more than
+throughput, set `WORKER_ENABLED=false` on the container and let the laptop take
+applies, or `APPLY_HEADLESS=false` with a real display/xvfb on a server. Either way a
+host that cannot produce the mode it asked for measures itself as **unable to apply**
+and leaves QUEUED rows alone instead of faking a READY.
 
 **Build command** (`railway.json`) is now:
 
@@ -259,7 +275,7 @@ better than a deploy that does not start. Skip it with
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 115 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 122 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers
 ```
 

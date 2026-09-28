@@ -1218,7 +1218,10 @@ export async function finishRun(id, outcome, extra = {}) {
   return transition(id, to, 'worker', {
     screenshot_path: extra.screenshot_path ?? null,
     screenshots_json: extra.screenshots_json ?? null,
-    fail_reason: outcome === 'failed' ? (extra.reason || 'Application failed') : null,
+    // A PENDING row is a question a human has to answer, so it has to carry the
+    // words of the answer it wants ("Ashby flagged this as possible spam").
+    // Blank fail_reasons are why an unclear run read as a mystery.
+    fail_reason: outcome === 'failed' ? (extra.reason || 'Application failed') : (extra.reason || null),
     resolution_log_json: extra.resolution_log_json ?? null,
     finished_at: ['SUCCESS', 'FAILED'].includes(to) ? nowIso() : null
   });

@@ -27,6 +27,7 @@ import { ROOT_DIR } from '../db/index.js';
 import { browserState, checkBrowser } from '../core/browser-check.js';
 import { applyLaunchMode, applyLaunchLabel } from '../core/apply-mode.js';
 import { classifyRunFault } from '../core/host-fault.js';
+import { readUnknownBanner } from '../core/submission-banner.js';
 import { browserCapacity, effectiveLimit } from '../core/host-capacity.js';
 import {
   listQueuedForWorker, claimForRun, finishRun, markRunCrash,
@@ -60,12 +61,14 @@ const POLL_MS = Math.max(2000, Number(process.env.WORKER_POLL_MS || 8000));
 // reads exactly this variable), which keeps engine, probe and worker agreeing.
 const APPLY_MODE = applyLaunchMode();
 const HEADLESS_APPLY = APPLY_MODE.headless;
-// With no cap, one tick would launch every queued browser inside the same
-// second: a RAM spike plus a bot-shaped stampede of identical simultaneous page
-// loads. Space the STARTS (they still all run concurrently afterwards). Ignored
-// while a cap exists, because the cap already paces them.
-const START_SPACING_MS = WANTED_MAX === Infinity
-  ? 0 : Math.max(0, Number(process.env.RUN_START_SPACING_MS ?? 1500));
+// Browsers that start in the same second are a RAM spike and a bot-shaped
+// stampede of identical simultaneous page loads. A CAP limits how many may start
+// together, never WHEN - so starts are staggered on every host, capped or not.
+// (This used to be inverted: an uncapped worker fired the whole queue at once,
+// which is exactly the shape Ashby's anti-spam filter reported on.) Set
+// RUN_START_SPACING_MS=0 to disable. It is a memory/shape measure, not a
+// deliverability fix: no spacing makes a datacenter IP look residential.
+const START_SPACING_MS = Math.max(0, Number(process.env.RUN_START_SPACING_MS ?? 1500));
 // Runs use an OS temp dir OUTSIDE the repo so no applicant artefact (profile,
 // answers, downloaded resume, engine job-status JSON, screenshots) ever lands
 // in the working tree. The whole per-run dir is deleted the moment the run
@@ -239,12 +242,22 @@ async function launch(app) {
     let outcome = 'failed';
     let reason = 'Engine process exited without a result';
     let missingFields = [];
+    let flagged = '';
     const result = readLatestResult(storeDir);
     if (result) {
       const status = String(result.applicationStatus || result.status || '').toLowerCase();
       if (status === 'success') outcome = 'success';
       else if (status === 'failed') { outcome = 'failed'; reason = result.bannerText || result.reason || 'Validation error'; }
-      else if (status === 'unknown' || status === 'manual-review' || status === 'pending') { outcome = 'pending'; reason = status === 'manual-review' ? 'No submit button (manual review)' : 'Outcome unclear'; }
+      else if (status === 'unknown' || status === 'manual-review' || status === 'pending') {
+        outcome = 'pending';
+        reason = status === 'manual-review' ? 'No submit button (manual review)' : 'Outcome unclear';
+        // Ashby's own words beat our guess about an unclear page. The engine only
+        // recognises success and missing-fields, and stores everything else as
+        // 'unknown' WITH the page text - so a red "flagged as possible spam"
+        // banner used to be filed as our not knowing. Name it instead.
+        const banner = readUnknownBanner(result.bannerText);
+        if (banner) { flagged = banner.kind; reason = banner.reason; }
+      }
       // A result file that names no status is still proof the page was reached,
       // so it stays a failure - but say WHICH outcome, not the no-result sentence.
       else if (outcome === 'failed') reason = result.bannerText || result.reason || `Engine reported no recognised outcome${status ? ` (${status})` : ''}`;
@@ -291,7 +304,8 @@ async function launch(app) {
     const shots = await persistScreenshots(app, runId, result);
     try {
       await finishRun(app.id, outcome, { screenshot_path: shots.acknowledgementUrl, screenshots_json: shots.json, reason });
-      await logEvent(app.id, `run_${outcome}`, 'worker', { run_id: runId, reason: reason || null, missing_fields: missingFields, screenshots: shots.meta });
+      await logEvent(app.id, flagged ? `run_${flagged}_flagged` : `run_${outcome}`, 'worker', { run_id: runId, reason: reason || null, missing_fields: missingFields, screenshots: shots.meta });
+      if (flagged) console.log(`[run ${app.id}] Ashby outcome named by the banner (${flagged}) - left PENDING for a human, not retried from this host`);
       // Re-loop: if the run failed because required fields were still blank, the
       // automation had no data to fill them. Surface those exact questions to the
       // CA as blockers and reopen the application to ASSIGNED, so the next apply

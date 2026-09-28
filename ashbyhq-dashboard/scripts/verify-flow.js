@@ -23,7 +23,9 @@
         against the memory actually available (core/host-capacity.js), and a run
         that was killed or said nothing without ever writing a result is a HOST
         fault handed back to the queue, not an applicant's FAILED record
-        (core/host-fault.js).
+        (core/host-fault.js). An unclear post-submit page is read for what Ashby
+        actually said, so a spam rejection is named instead of filed as our not
+        knowing (core/submission-banner.js).
      2. an applicant is addressable by AWL-ID alone (profile present /
         needs a fetch);
      3. the post-SUCCESS privacy erase removes the form data and keeps
@@ -54,6 +56,7 @@ import { browserState, canDriveBrowsers } from '../core/browser-check.js';
 import { applyLaunchMode } from '../core/apply-mode.js';
 import { hostMemory, browserCapacity, effectiveLimit } from '../core/host-capacity.js';
 import { classifyRunFault } from '../core/host-fault.js';
+import { readUnknownBanner } from '../core/submission-banner.js';
 import { judgeScan, inventoryIsResidue } from '../core/scan-verdict.js';
 import { buildReviewQuestions, questionIsOptional } from '../draft-service.js';
 import { fieldKeyOf } from '../../field-applier.js';
@@ -69,6 +72,7 @@ let failed = 0;
 const SCAN_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'scan-link.js');
 const PROBE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'core', 'browser-probe.js');
 const RUNNER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'runner.js');
+const STORE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'db', 'store.js');
 function runScanScript(url, env) {
   return runChild(SCAN_SCRIPT, [url], env);
 }
@@ -364,6 +368,42 @@ async function verifyCapabilityGate() {
     /classifyRunFault\(/.test(runnerSrc) && /child\.on\('close', \(code, signal\)/.test(runnerSrc)
       && !/const NO_BROWSER_SIG/.test(runnerSrc),
     'the signature lives in core/host-fault.js');
+
+  // Ashby's anti-spam banner is an OUTCOME, not a mystery. Two of the three
+  // submissions Railway made came back with this red box and were filed as
+  // PENDING "Outcome unclear", which asked a human to go read a screenshot to
+  // learn what the page had already said in words.
+  const SPAM_PAGE = 'Senior Data Engineer\nOverview\nApplication\n'
+    + 'We couldn\'t submit your application\n'
+    + 'Your application submission was flagged as possible spam. If you believe this was a '
+    + 'mistake, please submit your application again.\nTry these steps\nTurn off your VPN or proxy';
+  const spam = readUnknownBanner(SPAM_PAGE);
+  check('the spam banner is NAMED, not left as "Outcome unclear"',
+    spam && spam.kind === 'spam' && /possible spam/.test(spam.reason) && /NOT submitted/.test(spam.reason),
+    spam && spam.reason);
+  check('...and says who to blame, so nobody retries it from the same host',
+    /datacenter IP/.test(spam.reason) && /home connection/.test(spam.reason));
+  check('a page we genuinely cannot read is still no verdict (we do not guess)',
+    readUnknownBanner('Senior Data Engineer Application') === null
+    && readUnknownBanner('') === null && readUnknownBanner(null) === null);
+  check('quoting the banner cannot paste a whole page into the reason',
+    readUnknownBanner(`x\n${'flagged as possible spam '.repeat(400)}\ny`).reason.length <= 400
+    && readUnknownBanner(`x\n${'flagged as possible spam '.repeat(400)}\ny`).reason.length
+      === readUnknownBanner(`flagged as possible spam ${'z'.repeat(20_000)}`).reason.length);
+  check('the worker reads the banner before calling a run unclear',
+    /readUnknownBanner\(/.test(runnerSrc) && /run_\$\{flagged\}_flagged/.test(runnerSrc));
+  // ...and the reason has to reach the row a human looks at: finishRun used to
+  // null fail_reason for anything that was not a failure, so both spam-flagged
+  // applications sat PENDING with an empty explanation column.
+  check('a PENDING run keeps its reason on the row instead of going blank',
+    /fail_reason: outcome === 'failed'[\s\S]{0,120}\(extra\.reason \|\| null\)/
+      .test(fs.readFileSync(STORE_SCRIPT, 'utf8')));
+  // Start spacing used to be switched off precisely when it was needed: an
+  // uncapped worker launched the whole queue in the same second, and three
+  // identical simultaneous submissions from one IP is what Ashby flags as spam.
+  check('starts are staggered on every host, capped or unlimited',
+    /const START_SPACING_MS = Math\.max\(0, Number\(process\.env\.RUN_START_SPACING_MS \?\? 1500\)\)/.test(runnerSrc)
+      && !/WANTED_MAX === Infinity\s*\n?\s*\?\s*0/.test(runnerSrc));
 
   // The verdict rules (pure): the shapes that used to be cached and published.
   const goodPosting = { h1: 'Staff Data Engineer', docTitle: 'Staff Data Engineer - Acme', jobTitle: '', headingAttr: '' };
