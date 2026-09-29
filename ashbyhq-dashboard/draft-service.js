@@ -108,12 +108,38 @@ export function questionIsOptional(field) {
 
 // Best-effort placeholder for an OPTIONAL text-family field whose value we
 // won't invent. Radio / select / checkbox are excluded (never force Yes/No),
-// and numeric / date boxes are excluded too - a fake "0" or "N/A" there is
-// invalid data that Ashby rejects, so those fall through to 'missing_fact'.
-function placeholderFor(kind, type) {
+// numeric / date boxes are excluded (a fake "0"/"N/A" is invalid data Ashby
+// rejects), and so are URL / link boxes: "N/A" is not a valid URL, and Ashby
+// answers it with "Please enter a valid URL" - which is what failed a real
+// submission. A link field with nothing to source stays blank for the CA.
+export function placeholderFor(kind, type, questionText = '') {
   if (/^(number|date|month|time)$/i.test(String(type || ''))) return null;
+  if (/url|link|website|portfolio|linkedin|github|gitlab|behance|dribbble|social|http/i.test(String(questionText || ''))) return null;
   if (kind === 'text' || kind === 'textarea' || kind === 'combobox') return 'N/A';
   return null;
+}
+
+// The OTHER source the operator pointed at: mine the applicant's own resume text
+// for a confident shape match before ever asking the CA. Deliberately narrow -
+// only email / phone / link questions, and only a clean regex hit. Anything
+// ambiguous returns '' and still goes to the CA, so this can never invent an
+// answer the way a guessed column binding could. It is model-free, so it keeps
+// working when GenAI is quota-exhausted (HTTP 429).
+const RES_EMAIL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+const RES_PHONE = /\+?\d[\d\s().-]{6,}\d/;
+const RES_URL = /https?:\/\/[^\s)\]<>]+/i;
+export function resumeShapeAnswer(questionText = '', resumeText = '') {
+  const t = String(questionText || '').toLowerCase();
+  const text = String(resumeText || '');
+  if (!text.trim()) return '';
+  if (/\bemail\b/.test(t)) { const m = text.match(RES_EMAIL); return m ? m[0] : ''; }
+  if (/phone|mobile|cell|contact number|callable/.test(t)) { const m = text.match(RES_PHONE); return m ? m[0].trim() : ''; }
+  if (/link|url|website|portfolio|linkedin|github|gitlab|behance|dribbble|social|http/.test(t)) {
+    if (/linkedin/.test(t)) { const m = text.match(/https?:\/\/[^\s)\]<>]*linkedin[^\s)\]<>]*/i); if (m) return m[0]; }
+    if (/github/.test(t)) { const m = text.match(/https?:\/\/[^\s)\]<>]*github[^\s)\]<>]*/i); if (m) return m[0]; }
+    const m = text.match(RES_URL); return m ? m[0] : '';
+  }
+  return '';
 }
 
 // A value that comes from a column the MODEL named (rather than from a curated
@@ -159,11 +185,18 @@ export async function runDraftPass(awlId, linkId, opts = {}) {
   // built" is not in there, but it IS in the resume the applicant applied with.
   // Without this the narrative questions had nothing honest to cite, so they
   // declined and every essay landed on the CA.
-  let resumeText = '';
-  if (useGenai) {
-    resumeText = await resumeTextFor(awlId, { log }).catch(() => '');
-    if (resumeText) log(`resume grounded the draft (${resumeText.length} chars)`);
-  }
+  // The resume is fetched lazily and shared: GenAI grounds on it, and the
+  // model-free shape fallback below reads it too, so a pass where every field
+  // is already covered by the record never downloads it at all.
+  let resumeText = null;
+  const ensureResumeText = async () => {
+    if (resumeText === null) {
+      resumeText = await resumeTextFor(awlId, { log }).catch(() => '');
+      if (resumeText) log(`resume available for the draft (${resumeText.length} chars)`);
+    }
+    return resumeText;
+  };
+  if (useGenai) await ensureResumeText();
   const context = [`PROVIDED APPLICANT RECORD:\n${recordText}`]
     .concat(resumeText ? [`APPLICANT RESUME (parsed text):\n${resumeText.slice(0, 9000)}`] : [])
     .join('\n\n');
@@ -297,6 +330,32 @@ export async function runDraftPass(awlId, linkId, opts = {}) {
       }
     }
 
+    // Deterministic resume fallback (the CRM record already had its chance in
+    // Tiers 1-2.5): before handing an email / phone / link question to GenAI or
+    // to the CA, read the applicant's OWN resume for a clean shape match. It is
+    // model-free, so it survives the GenAI quota outage (429) that otherwise
+    // strands a value we genuinely have. A choice field only accepts a value
+    // that lands on one of its presented options.
+    const rt = await ensureResumeText();
+    const fromResume = resumeShapeAnswer(r.question_text, rt);
+    if (fromResume) {
+      let rvalue = fromResume;
+      if (isChoice) {
+        const matched = matchOption(r.options || [], fromResume);
+        rvalue = matched || '';
+      }
+      if (rvalue) {
+        await upsertFieldAnswer({
+          awlId, linkId, fieldKey: r.field_key, questionText: r.question_text,
+          fieldType: r.field_type, options: r.options, value: rvalue,
+          source: 'deterministic', evidence: ['from the applicant resume'], sortOrder: r.sort_order, optional
+        });
+        outcome.deterministic += 1;
+        outcome.rows.push({ key: r.field_key, source: 'deterministic', via: 'resume', question: r.question_text, value: rvalue });
+        continue;
+      }
+    }
+
     // Tier 3: GenAI draft — always grounded, never invented. Reached only when
     // no rule and no bound column could source the value: i.e. genuinely
     // narrative questions ("what excites you about X?") and facts the CRM has.
@@ -353,7 +412,7 @@ export async function runDraftPass(awlId, linkId, opts = {}) {
     //     prompted. We must NEVER silently N/A a required field: that hides
     //     the gap from the review pane, slips past the APPLY gate, and gets
     //     rejected by Ashby at submit (e.g. "N/A" in a date / year box).
-    const ph = optional ? placeholderFor(r.field_type, field.type) : null;
+    const ph = optional ? placeholderFor(r.field_type, field.type, r.question_text) : null;
     if (ph) {
       await upsertFieldAnswer({
         awlId, linkId, fieldKey: r.field_key, questionText: r.question_text,

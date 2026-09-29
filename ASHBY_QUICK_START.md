@@ -347,14 +347,47 @@ covers its common spellings (Phone Number, Primary/Mobile/Cell/Contact Number,
 WhatsApp…) and reads the number straight from the record with no API call, while
 still refusing unrelated "…Number" boxes.
 
+**The resume is mined before the CA is ever asked.** Now that the CRM record has
+had its chance (Tiers 1–2.5), an email / phone / link question that the record
+could not answer is read straight out of the **applicant's own resume** by a
+model-free shape match (`draft-service.js: resumeShapeAnswer`) — so it keeps
+working while GenAI is quota-exhausted, and a value we genuinely hold is never
+dumped on a CA. It is deliberately narrow: only a clean email/phone/URL hit from
+the resume fills, anything ambiguous still goes to the CA, so nothing is invented.
+Alongside it, `placeholderFor` will **never** type "N/A" into a URL / link /
+portfolio / LinkedIn box again — "N/A" is not a valid URL and Ashby rejects it
+with "Please enter a valid URL", which is exactly what failed a real submission.
+A link field with nothing to source stays blank for the CA rather than being
+poisoned with a placeholder.
+
+**The worker idles when there is nothing to do, and never hangs.** An empty queue
+already launches nothing (the poll tick claims zero rows and returns). The one
+real gap was a run that never returned: it would hold a browser slot forever.
+A `RUN_TIMEOUT_MS` watchdog (default 6 min, `worker/runner.js`) now SIGKILLs a
+child that outlives it, so `finish()` runs, the slot is freed, and the worker goes
+idle — a stuck or empty queue can never keep a machine busy. After both evidence
+shots the engine exits on its own; the watchdog is a brake on a hung child, not a
+cap on a normal run.
+
+**On the pre-submit screenshot not tiling the whole page.** Both evidence shots
+are taken by the base engine (`ashby-hybrid-automation.js`, `page.screenshot({
+fullPage: true })`), which is never edited. On Ashby's form a sticky header
+re-paints while Chromium scrolls-and-stitches the tall page, so the logo can
+overlap mid-page. This is cosmetic only — it is a review artefact, not what the
+form submits, and not the reason a submission failed. Fixing the stitching would
+mean editing the engine, which is off-limits, so it is flagged here rather than
+patched.
+
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 157 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 161 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits
-                      # + record-backed identity fields (phone) with no GenAI
+                      # + record-backed identity fields (phone) with no GenAI, the
+                      # URL-placeholder guard, the model-free resume fallback and the
+                      # hung-run watchdog
 ```
 
 ---

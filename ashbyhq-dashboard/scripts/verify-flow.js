@@ -66,7 +66,7 @@ import { readUnknownBanner } from '../core/submission-banner.js';
 import { classifyMissingResume, noConnectorHere, describeConnectorEnv, CRM_HOST_NAMES, CRM_URL_NAMES } from '../core/applicant-source.js';
 import { pgConfig } from '../connector/azure-config.js';
 import { judgeScan, inventoryIsResidue } from '../core/scan-verdict.js';
-import { buildReviewQuestions, questionIsOptional } from '../draft-service.js';
+import { buildReviewQuestions, questionIsOptional, placeholderFor, resumeShapeAnswer } from '../draft-service.js';
 import { fieldKeyOf } from '../../field-applier.js';
 import { __internals } from '../../genai-resume-filler.js';
 
@@ -683,6 +683,25 @@ async function verifyIdentityFieldRules() {
       .every((q) => phoneOf(q) === PHONE));
   check('an unrelated "…Number" box is never grabbed as a phone',
     phoneOf('Employee Number') === '' && phoneOf('Number of dependents') === '' && phoneOf('What is your work location?') === '');
+
+  // A URL box must never be stuffed with "N/A" (Ashby rejects it as an invalid
+  // URL and the submission dies), and a link/email/phone the CRM lacks is read
+  // from the applicant's OWN resume - model-free, so it survives a GenAI 429 -
+  // before ever being asked of the CA. And a hung run must not hold a browser.
+  check('a URL / link box is never filled with an invalid "N/A" placeholder',
+    placeholderFor('text', 'text', 'Links') === null
+      && placeholderFor('text', 'text', 'Portfolio URL') === null
+      && placeholderFor('text', 'text', 'How did you hear about us?') === 'N/A');
+  check('a phone / email / link is mined from the resume with no model call',
+    resumeShapeAnswer('Phone Number', 'Call me at 919-555-0142 any day') === '919-555-0142'
+      && resumeShapeAnswer('Email', 'reach me at teja@applicant.mail') === 'teja@applicant.mail'
+      && resumeShapeAnswer('Links', 'portfolio: https://teja.dev  ref: https://x.co/a') === 'https://teja.dev');
+  check('the resume fallback abstains on a narrative question it cannot shape-match',
+    resumeShapeAnswer('Why do you want this role?', 'https://teja.dev email a@b.co phone 919-555-0142') === '');
+  const runnerSrc = fs.readFileSync(RUNNER_SCRIPT, 'utf8');
+  check('a hung run is killed so the worker frees the slot and goes idle',
+    /RUN_TIMEOUT_MS/.test(runnerSrc) && /child\.kill\('SIGKILL'\)/.test(runnerSrc)
+      && /timedOut \? 'SIGKILL' : signal/.test(runnerSrc));
 }
 
 async function verifyDevLog(appA) {

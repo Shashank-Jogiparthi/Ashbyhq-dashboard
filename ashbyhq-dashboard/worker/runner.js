@@ -55,6 +55,13 @@ const WANTED_MAX = ['0', '-1', 'unlimited', 'none', 'infinity'].includes(RAW_MAX
 const BUDGET = browserCapacity();
 const MAX_CONCURRENT = effectiveLimit(WANTED_MAX, BUDGET).limit;
 const POLL_MS = Math.max(2000, Number(process.env.WORKER_POLL_MS || 8000));
+// A run that never returns would otherwise hold a browser slot forever. After
+// both evidence shots the engine exits on its own; if it hangs (a stuck page, a
+// browser that won't close) this watchdog kills the child so finish() reads
+// whatever result exists, frees the slot, and the worker goes idle - a hung or
+// empty queue never keeps a machine busy. It is a brake on a stuck child, not a
+// cap on a normal run (default 6 min, well past any real form).
+const RUN_TIMEOUT_MS = Math.max(30_000, Number(process.env.RUN_TIMEOUT_MS || 6 * 60 * 1000));
 // How an apply run launches HERE, decided once by core/apply-mode.js: an explicit
 // APPLY_HEADLESS/HEADLESS wins, otherwise a linux host with no display runs
 // headless and everything else opens a real window. The engine is never edited,
@@ -390,13 +397,24 @@ async function launch(app) {
         APPLICANT_DATA_DIR: storeDir
       }
     });
+    // Watchdog: if the child outlives RUN_TIMEOUT_MS, force it down. finish()
+    // then runs from the 'close' handler with timedOut set, so a run that had
+    // already written its result is filed normally and one that hung with no
+    // result is classified as a host fault and handed back to the queue.
+    let timedOut = false;
+    const killer = setTimeout(() => {
+      timedOut = true;
+      echo(`\nexceeded ${RUN_TIMEOUT_MS}ms with no exit - terminating the engine\n`, process.stdout, `[run ${app.id}] `);
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    }, RUN_TIMEOUT_MS);
     child.stdout.on('data', (d) => echo(d, process.stdout, `[run ${app.id}] `));
     child.stderr.on('data', (d) => echo(d, process.stderr, `[run ${app.id}!] `));
     // The exit code and signal are evidence, not bookkeeping: "killed by SIGKILL
     // with no result" is a memory death, "exit 1 with a fatal error printed" is
     // the engine's own failure, and only the second one belongs to the applicant.
-    child.on('close', (code, signal) => { childExit = { code, signal }; finish(); });
+    child.on('close', (code, signal) => { clearTimeout(killer); childExit = { code, signal: timedOut ? 'SIGKILL' : signal }; finish(); });
     child.on('error', async (err) => {
+      clearTimeout(killer);
       active.delete(app.id);
       try { await markRunCrash(app.id, `Spawn error: ${err.message}`); } catch { /* ignore */ }
       cleanupRun(runDir);
