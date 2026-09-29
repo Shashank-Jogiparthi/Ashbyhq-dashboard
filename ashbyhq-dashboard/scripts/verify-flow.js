@@ -800,6 +800,18 @@ async function verifyStaffDirectory() {
     /s\.name AS ca_name[\s\S]{0,120}m\.name AS manager_name/.test(storeSrc));
   check('a re-assigned applicant re-points live work but keeps SUCCESS history',
     /UPDATE applications SET ca_id[\s\S]{0,200}status <> 'SUCCESS'/.test(storeSrc));
+
+  // The same drill-down an OM + DEV open must SHOW the run evidence, not just
+  // list it, and a client row must narrow to that client's applications + snaps.
+  const APPJS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'app.js');
+  const appSrc = fs.readFileSync(APPJS, 'utf8');
+  check('the OM/DEV CA drill-down renders the run screenshots per application',
+    /renderCaSummaryInto[\s\S]{0,1800}screenshotsHtml\(a\)/.test(appSrc));
+  check('a client row click narrows the list to that client and its snaps',
+    /data-client-awl/.test(appSrc) && /appsHtml\(awl\)/.test(appSrc));
+  const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
+  check('an OPS may drill only a CA inside their own tree (manager_id guard)',
+    /\/api\/team\/ca\/:uuid[\s\S]{0,340}caRow\.manager_id !== req\.user\.uuid/.test(serverSrc));
 }
 
 async function verifyCrmFetch() {

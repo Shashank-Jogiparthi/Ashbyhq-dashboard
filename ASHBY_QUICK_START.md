@@ -315,12 +315,22 @@ fixtures are retired (`active=0`, never deleted); the dev/testing rows you kept
 pane reads it at *Staff tree* (`/api/dev/staff/tree`) with a live
 `staffDirectoryStats()`. If the CRM names a CA outside the roster it is shown
 as `tree_unresolved` — that applicant gets its OM but no CA until you add the
-person to the roster.
+person to the roster. **Client info is fetched only by the Applicant DB
+connector** (`connector/applicant-db.js`, pool from `azure-config.js`)
+— staff-directory.js reads just the CA/OM edge columns.
+
+**The OM + DEV snapshot view.** In the OPS *CA view* tab and the DEV *People*
+tab, drilling into a CA now lists every one of their job links **with the run's
+pre-submit + acknowledgement screenshots**, and clicking a client's AWL-ID
+narrows the list to just that client's applications with their snaps + link
+attached. An OM sees only the CAs under them (the endpoint refuses a CA outside
+their `manager_id`), how many applications each CA made, and for which clients
+— then opens any client to see that evidence.
 
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 147 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 150 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping

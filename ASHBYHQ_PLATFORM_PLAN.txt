@@ -1109,6 +1109,23 @@ AWL-ID -> CA -> OM(CAM) tree is READ, never invented.
     HTTP port never waits on it) and exposes it to the DEV pane at
     GET/POST /api/dev/staff/tree, which also returns staffDirectoryStats().
 
+  * FETCH OWNERSHIP: the component responsible for reading client info out
+    of the permitted tables is the Applicant DB connector
+    (connector/applicant-db.js) - it opens the Azure pool via
+    connector/azure-config.js and reads client_profiles +
+    clients_additional_info (mapCombined), and ashby_joblinks for the links.
+    staff-directory.js only reads the CA/OM edge columns to attach the
+    applicant to staff; it fetches no PII. Nothing else touches those tables.
+
+  * THE SNAP VIEW an OM + DEV open (OPS 'CA view' tab and DEV 'People' tab,
+    both through renderCaSummaryInto on GET /api/team/ca/:uuid) shows the
+    evidence, not just a list: every job link carries the run's pre-submit +
+    acknowledgement screenshots (screenshots_html), and clicking a client's
+    AWL-ID narrows the list to just that client's applications with their
+    snaps + link attached. An OPS may drill only a CA inside their own tree -
+    the endpoint refuses a foreign manager_id - so a manager sees exactly
+    their CAs, how many applications each made, and for which clients.
+
 LIVE PROOF (real Supabase + Azure CRM): seeding produced 59 CA + 2 OPS +
 2 ADMIN real staff and retired 5 fixtures; of the 62 distinct (ca,om) pairs
 the CRM names, 59 CAs linked onto their managers. AWL-25663 resolved to
@@ -1129,8 +1146,10 @@ verify:flow (step 7) asserts this as a RULE, not a setting: the roster counts
 resolveTree maps an applicant to a real CA + OM (and reads the squashed
 column spelling identically); an unrostered CA is named unresolved and
 creates no staff row; linkCaManagers draws an edge only when both ends
-exist; and the two sign-in joins filter on ap.ca_id / s.manager_id while the
-re-point keeps SUCCESS history. 147 checks pass.
+exist; the two sign-in joins filter on ap.ca_id / s.manager_id while the
+re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
+screenshots with a client click-through; and /api/team/ca guards an OPS to
+their own manager_id. 150 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an

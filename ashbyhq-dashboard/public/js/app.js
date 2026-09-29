@@ -707,11 +707,30 @@ async function renderOpsLinks() {
 
 async function renderCaSummaryInto(pane, caUuid) {
   const d = await api(`/api/team/ca/${caUuid}`);
-  const appRows = d.applications.map((a) => [
-    a.id, `<span class="mono">${esc(a.awl_id)}</span>`, esc(a.full_name),
-    `<b>${esc(a.company)}</b> — ${esc(a.title)}`,
-    chip(a.status), esc(a.skip_reason || a.fail_reason || '—'), fmt(a.updated_at)
-  ]);
+  // One CA's work, read-only for their OM + DEV: every job link with the run's
+  // pre-submit + acknowledgement screenshots, filterable down to a single client
+  // by clicking that client's row. No CA action buttons here - the OM/DEV observe
+  // the evidence, they do not run the application.
+  const appsHtml = (awl) => {
+    const list = d.applications.filter((a) => !awl || a.awl_id === awl);
+    if (!list.length) return '<p class="muted">No applications for this client yet.</p>';
+    return list.map((a) => `<div class="card queue-card">
+      <div class="head"><b>${esc(a.company)}</b> — ${esc(a.title)} ${chip(a.status)}</div>
+      <div class="muted mono"><a href="#" data-client-awl="${esc(a.awl_id)}">${esc(a.awl_id)}</a> · ${esc(a.full_name)}</div>
+      <div class="muted"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url)}</a></div>
+      ${a.link_status !== 'valid' ? `<span class="chip FAILED">link ${esc(a.link_status)}</span>` : ''}
+      ${a.skip_reason || a.fail_reason ? `<div class="muted">Reason: ${esc(a.skip_reason || a.fail_reason)}</div>` : ''}
+      ${a.updated_at ? `<div class="muted small">updated ${fmt(a.updated_at)}</div>` : ''}
+      ${screenshotsHtml(a)}
+    </div>`).join('');
+  };
+  const apRows = d.applicants.map((ap) => {
+    const mine = d.applications.filter((x) => x.awl_id === ap.awl_id);
+    const applied = mine.filter((x) => x.status === 'SUCCESS').length;
+    return [`<a href="#" data-client-awl="${esc(ap.awl_id)}" class="mono">${esc(ap.awl_id)}</a>`,
+      esc(ap.full_name), esc(ap.email), esc(ap.am_name || '—'),
+      ap.job_count, `${applied}/${mine.length}`];
+  });
   pane.innerHTML = `
     <div class="card" style="margin-bottom:14px;">
       <b>${esc(d.ca.name)}</b> <span class="chip role-ca">CA</span>
@@ -721,18 +740,28 @@ async function renderCaSummaryInto(pane, caUuid) {
     </div>
     ${statsHtml(d.counters)}
     <h3>Applicants (${d.applicants.length})</h3>
-    ${tableHtml(['AWL-ID', 'Name', 'Email', 'AM', 'Jobs', 'Applied'], d.applicants.map((ap) => {
-      const mine = d.applications.filter((x) => x.awl_id === ap.awl_id);
-      return [`<span class="mono">${esc(ap.awl_id)}</span>`, esc(ap.full_name), esc(ap.email),
-        esc(ap.am_name || '—'), ap.job_count, `${mine.filter((x) => x.status === 'SUCCESS').length}/${mine.length}`];
-    }))}
-    <h3 style="margin-top:20px;">Applications (${d.applications.length})</h3>
-    ${tableHtml(['#', 'AWL-ID', 'Applicant', 'Job', 'Status', 'Reason', 'Updated'], appRows)}
+    <p class="muted">Click a client (an AWL-ID) to load just their applications, each with the job link and the run screenshots.</p>
+    ${tableHtml(['AWL-ID', 'Name', 'Email', 'AM', 'Jobs', 'Applied'], apRows)}
+    <h3 id="ca-apps-head" style="margin-top:20px;">Applications (${d.applications.length})</h3>
+    <div id="ca-apps-list">${appsHtml(null)}</div>
     <h3 style="margin-top:20px;">Recent activity</h3>
     <div class="card activity"><ul>${d.events.map((e) => `
       <li><b>${esc(e.type)}</b> ${e.awl_id ? `· <span class="mono">${esc(e.awl_id)}</span>` : ''}
         ${e.company ? `· ${esc(e.company)} — ${esc(e.title)}` : ''} · <span class="muted">${fmt(e.ts)}</span></li>`).join('')
       || '<li>None yet.</li>'}</ul></div>`;
+
+  // Client click-through: an AWL-ID link narrows the applications list to that
+  // one client (their job links + snaps), then updates the heading.
+  pane.querySelectorAll('[data-client-awl]').forEach((link) => {
+    link.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const awl = link.dataset.clientAwl;
+      const head = pane.querySelector('#ca-apps-head');
+      const list = pane.querySelector('#ca-apps-list');
+      if (head) head.textContent = `Applications — ${awl}`;
+      if (list) { list.innerHTML = appsHtml(awl); list.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+    });
+  });
 }
 
 async function renderOpsCaView() {
