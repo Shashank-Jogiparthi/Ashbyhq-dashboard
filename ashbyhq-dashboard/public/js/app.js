@@ -565,31 +565,46 @@ async function renderOpsOverview() {
     `<b>${esc(ca.name)}</b><br><span class="muted mono">${esc(ca.email)}</span>`,
     ca.active ? 'ACTIVE' : 'INACTIVE',
     ca.applications,
+    `<div style="display:flex;gap:6px;align-items:center;">
+       <span class="muted small" data-ca-used="${ca.uuid}">${ca.assignedApplicants}/${ca.applicantQuota ?? 25}</span>
+       <input type="number" min="0" value="${ca.applicantQuota ?? 25}" data-ca-quota="${ca.uuid}" style="width:70px;" />
+       <button class="primary" data-ca-quota-save="${ca.uuid}">Set</button>
+     </div>`,
     fmt(ca.lastSignIn)
   ]);
   $('view').innerHTML = `
     ${statsHtml(data.counters)}
     <h3>Career Associates under me (${data.cas.length})</h3>
-    ${tableHtml(['CA', 'Status', 'Applications', 'Last sign-in'], casRows)}
+    <p class="muted" style="margin:0 0 10px;">Set how many applicants each CA may hold (default 25). New assignments are capped at a CA's own limit — you are no longer capped as a manager.</p>
+    ${tableHtml(['CA', 'Status', 'Applications', 'Applicant limit', 'Last sign-in'], casRows)}
     <h3 style="margin-top:22px;">Recent activity</h3>
     <div class="card activity"><ul>${data.events.slice(0, 12).map((e) => `
       <li><b>${esc(e.type)}</b> ${e.awl_id ? `· <span class="mono">${esc(e.awl_id)}</span>` : ''} · ${esc(e.actor_name || e.actor)} · <span class="muted">${fmt(e.ts)}</span></li>`).join('') || '<li>None yet.</li>'}</ul></div>`;
+
+  $('view').querySelectorAll('button[data-ca-quota-save]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const uuid = btn.dataset.caQuotaSave;
+      const quota = Number(document.querySelector(`[data-ca-quota="${uuid}"]`).value) || 0;
+      try {
+        await api(`/api/ops/ca/${uuid}/quota`, { method: 'POST', body: JSON.stringify({ quota }) });
+        toast('Applicant limit updated.');
+        openTab('overview');
+      } catch (err) { toast(err.message, true); }
+    });
+  });
 }
 
-/* ---------------- OPS assignment pool (AWL-ID -> CA, quota-capped) --- */
+/* ---------------- OPS assignment pool (AWL-ID -> CA, per-CA capped) --- */
 
 async function renderOpsAssignments() {
-  const { applicants, quota, cas } = await api('/api/ops/pool');
-  const remaining = Math.max(0, quota.quota - quota.assigned);
-  const overCap = quota.assigned >= quota.quota;
+  const { applicants, cas } = await api('/api/ops/pool');
+  const atLimit = (c) => (c.assigned ?? 0) >= (c.applicant_quota ?? 25);
   $('view').innerHTML = `
     <div class="stat-grid" style="margin-bottom:14px;">
-      <div class="stat ${overCap ? 'red' : 'green'}"><div class="label">Quota used</div><div class="value">${quota.assigned}/${quota.quota}</div></div>
-      <div class="stat blue"><div class="label">Remaining</div><div class="value">${remaining}</div></div>
       <div class="stat yellow"><div class="label">Unassigned in pool</div><div class="value">${applicants.length}</div></div>
+      <div class="stat blue"><div class="label">CAs under you</div><div class="value">${cas.length}</div></div>
     </div>
-    <p class="muted" style="margin:0 0 12px;">Applicants streamed from the DB that still need a CA. Pick a CA and assign — their job links materialise into that CA's queue. <b>Ask DEV to raise your quota if you hit the cap.</b></p>
-    ${overCap ? '<div class="error-box">Applicant quota reached — no new assignments until DEV raises it.</div>' : ''}
+    <p class="muted" style="margin:0 0 12px;">Applicants streamed from the DB that still need a CA. Pick a CA and assign — their job links materialise into that CA's queue. Each CA is capped at their own applicant limit (set it in the Overview tab).</p>
     ${cas.length ? '' : '<div class="error-box">No CAs under you yet. Ask DEV to add some.</div>'}
     ${applicants.length
       ? tableHtml(['Applicant', 'AWL-ID', 'Email', 'Pending links', 'Assign to CA'], applicants.map((a) => [
@@ -599,8 +614,8 @@ async function renderOpsAssignments() {
           a.pending_links,
           cas.length
             ? `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                 <select data-assign-ca="${esc(a.awl_id)}" ${overCap ? 'disabled' : ''}>${cas.map((c) => `<option value="${c.uuid}">${esc(c.name)}</option>`).join('')}</select>
-                 <button class="primary" data-assign="${esc(a.awl_id)}" ${overCap ? 'disabled' : ''}>Assign</button>
+                 <select data-assign-ca="${esc(a.awl_id)}">${cas.map((c) => `<option value="${c.uuid}" ${atLimit(c) ? 'disabled' : ''}>${esc(c.name)} (${c.assigned ?? 0}/${c.applicant_quota ?? 25})${atLimit(c) ? ' — full' : ''}</option>`).join('')}</select>
+                 <button class="primary" data-assign="${esc(a.awl_id)}">Assign</button>
                </div>`
             : '<span class="muted">no CAs</span>'
         ]))
@@ -923,6 +938,8 @@ async function renderDevDataSync() {
     api('/api/dev/scan-queue').catch(() => ({ counts: {}, running: [], recent: [], unscanned: [] }))
   ]);
   const opsStaff = data.staff.filter((s) => s.role === 'ops');
+  const caStaff = data.staff.filter((s) => s.role === 'ca');
+  const staffName = new Map(data.staff.map((s) => [s.uuid, s.name]));
   const ws = data.system.worker || {};
   // A CRM connector belongs to the machine that runs the code, not to the shared
   // database, so this card has to say which host is answering and which of the
@@ -1005,15 +1022,15 @@ async function renderDevDataSync() {
     </div>
 
     <div class="card" style="margin-bottom:14px;">
-      <b>Per-OPS applicant quota</b>
-      <p class="muted">How many applicants each OPS manager may hold. This is the cap “we” set.</p>
-      ${tableHtml(['OPS', 'Email', 'Quota'], opsStaff.map((c) => [
-        esc(c.name), `<span class="mono">${esc(c.email)}</span>`,
+      <b>Per-CA applicant quota</b>
+      <p class="muted">How many applicants each Career Associate may hold (default 25). OMs set this for their own CAs from the Overview tab; DEV/ADMIN can set any here. New assignments are capped at the CA's own limit — managers are no longer capped.</p>
+      ${tableHtml(['CA', 'Email', 'Under OM', 'Quota'], caStaff.map((c) => [
+        esc(c.name), `<span class="mono">${esc(c.email)}</span>`, esc(staffName.get(c.managerId) || '—'),
         `<div style="display:flex;gap:6px;align-items:center;">
            <input type="number" min="0" value="${c.applicantQuota ?? 25}" data-quota="${c.uuid}" style="width:90px;" />
            <button class="primary" data-quota-save="${c.uuid}">Set</button>
          </div>`
-      ])) || '<p class="muted">No OPS managers yet.</p>'}
+      ])) || '<p class="muted">No CAs yet.</p>'}
     </div>
 
     <div class="card">

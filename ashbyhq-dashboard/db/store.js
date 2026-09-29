@@ -176,7 +176,9 @@ export async function getStaff(staffUuid) {
 
 export async function listCasForManager(managerUuid) {
   return db.prepare(
-    "SELECT uuid, name, email FROM staff WHERE role = 'ca' AND manager_id = ? AND active = 1 ORDER BY name"
+    `SELECT uuid, name, email, applicant_quota,
+       (SELECT COUNT(*) FROM applicants ap WHERE ap.ca_id = staff.uuid) AS assigned
+     FROM staff WHERE role = 'ca' AND manager_id = ? AND active = 1 ORDER BY name`
   ).all(managerUuid);
 }
 
@@ -565,6 +567,17 @@ export async function updateStaffQuota(staffUuid, quota) {
   return getStaff(staffUuid);
 }
 
+// A CA's OWN applicant limit (set by their OM, default 25) and how many
+// applicants currently sit with them. This - not a DEV-set ceiling on the OPS
+// manager - is what caps an assignment now.
+export async function caQuotaUsage(caUuid) {
+  const ca = await getStaff(caUuid);
+  const assigned = (await db.prepare(
+    'SELECT COUNT(*) AS n FROM applicants WHERE ca_id = ?'
+  ).get(caUuid)).n;
+  return { quota: ca?.applicant_quota ?? 25, assigned };
+}
+
 // The OPS manager's central action: attach an unassigned applicant to one of
 // their CAs, then materialise that applicant's pending job links into ASSIGNED
 // applications so they appear in the CA's queue.
@@ -576,9 +589,14 @@ export async function assignApplicantToCa(awlId, caUuid, actor) {
 
   if (actor.role === 'ops') {
     if (ca.manager_id !== actor.uuid) throw new HttpError(400, 'That CA is not under you');
-    const usage = await getQuotaUsage(actor.uuid);
-    if (applicant.ca_id == null && usage.assigned >= usage.quota) {
-      throw new HttpError(400, `Applicant quota reached (${usage.assigned}/${usage.quota}) — ask DEV to raise it`);
+    // The CA's OWN limit (their OM sets it, default 25) is the cap - not a
+    // DEV-imposed ceiling on the manager. Re-attaching an applicant already on
+    // this CA does not count twice. DEV/ADMIN may exceed it to rebalance.
+    if (applicant.ca_id !== ca.uuid) {
+      const usage = await caQuotaUsage(ca.uuid);
+      if (usage.assigned >= usage.quota) {
+        throw new HttpError(400, `${ca.name} is at their applicant limit (${usage.assigned}/${usage.quota}) — raise it in the CA view or pick another CA`);
+      }
     }
   } else if (actor.role !== 'dev' && actor.role !== 'admin') {
     throw new HttpError(403, 'Only an OPS manager (or DEV/ADMIN) can assign applicants to CAs');

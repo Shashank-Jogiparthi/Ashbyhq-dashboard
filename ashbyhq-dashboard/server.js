@@ -28,6 +28,7 @@ import {
   skipApplication,
   getUnassignedPool,
   getQuotaUsage,
+  caQuotaUsage,
   assignApplicantToCa,
   listCasForManager,
   updateStaffQuota,
@@ -487,6 +488,17 @@ app.get('/api/ops/pool', requireAuth, requireRole('ops', 'dev', 'admin'), wrap(a
 app.post('/api/ops/assign', requireAuth, requireRole('ops', 'dev', 'admin'), wrap(async (req) =>
   await assignApplicantToCa(String(req.body.awlId), req.body.caUuid, req.user)));
 
+// An OM sets one of their own CAs' applicant limit (default 25). DEV/ADMIN may
+// set any CA. The cap is enforced per-CA at assignment, not on the manager.
+app.post('/api/ops/ca/:uuid/quota', requireAuth, requireRole('ops', 'dev', 'admin'), wrap(async (req) => {
+  const ca = await getStaff(req.params.uuid);
+  if (!ca || ca.role !== 'ca') throw new HttpError(400, 'Target must be a CA');
+  if (req.user.role === 'ops' && ca.manager_id !== req.user.uuid) {
+    throw new HttpError(403, 'That CA is not under you');
+  }
+  return { staff: await updateStaffQuota(req.params.uuid, req.body.quota) };
+}));
+
 // Drill into one CA: their applicants, queue, counters, activity (OPS: own tree only).
 app.get('/api/team/ca/:uuid', requireAuth, requireRole('ops', 'dev', 'admin'), wrap(async (req) => {
   if (req.user.role === 'ops') {
@@ -503,14 +515,19 @@ app.get('/api/ops/overview', requireAuth, requireRole('ops', 'dev', 'admin'), wr
   const cas = (await listStaff('ca')).filter((ca) => ca.manager_id === managerUuid);
   return {
     counters: await statusCounters({ role: 'ops', uuid: managerUuid }),
-    cas: await Promise.all(cas.map(async (ca) => ({
-      uuid: ca.uuid,
-      name: ca.name,
-      email: ca.email,
-      active: !!ca.active,
-      lastSignIn: ca.last_sign_in,
-      applications: (await getApplications({ role: 'ca', uuid: ca.uuid })).length
-    }))),
+    cas: await Promise.all(cas.map(async (ca) => {
+      const usage = await caQuotaUsage(ca.uuid);
+      return {
+        uuid: ca.uuid,
+        name: ca.name,
+        email: ca.email,
+        active: !!ca.active,
+        lastSignIn: ca.last_sign_in,
+        applicantQuota: usage.quota,
+        assignedApplicants: usage.assigned,
+        applications: (await getApplications({ role: 'ca', uuid: ca.uuid })).length
+      };
+    })),
     applications: await getApplications({ role: 'ops', uuid: managerUuid }),
     applicants: await getApplicantsForManager(managerUuid),
     events: await listEvents({ managerUuid, limit: 40 })

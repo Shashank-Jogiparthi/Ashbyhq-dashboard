@@ -812,6 +812,19 @@ async function verifyStaffDirectory() {
   const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
   check('an OPS may drill only a CA inside their own tree (manager_id guard)',
     /\/api\/team\/ca\/:uuid[\s\S]{0,340}caRow\.manager_id !== req\.user\.uuid/.test(serverSrc));
+
+  // Applicant limits are a per-CA ceiling their OWN manager sets (default 25),
+  // not a DEV-imposed cap on the manager. The assignment path enforces the CA's
+  // limit, and the manager may only raise a limit for a CA under them.
+  check('an assignment is capped by the CA\'s own limit, not the manager\'s',
+    /assignApplicantToCa[\s\S]{0,900}caQuotaUsage\(ca\.uuid\)/.test(storeSrc)
+      && !/assignApplicantToCa[\s\S]{0,900}getQuotaUsage\(actor\.uuid\)/.test(storeSrc));
+  check('a CA with no explicit limit defaults to 25 applicants',
+    /caQuotaUsage[\s\S]{0,320}applicant_quota \?\? 25/.test(storeSrc));
+  check('a manager may set a CA limit only inside their own tree (manager_id guard)',
+    /\/api\/ops\/ca\/:uuid\/quota[\s\S]{0,360}ca\.manager_id !== req\.user\.uuid/.test(serverSrc));
+  check('the manager Overview exposes an editable per-CA applicant limit',
+    /data-ca-quota-save/.test(appSrc) && /\/api\/ops\/ca\/\$\{uuid\}\/quota/.test(appSrc));
 }
 
 async function verifyCrmFetch() {

@@ -327,13 +327,22 @@ attached. An OM sees only the CAs under them (the endpoint refuses a CA outside
 their `manager_id`), how many applications each CA made, and for which clients
 — then opens any client to see that evidence.
 
+**Applicant limits are per-CA, and the OM owns them.** The cap no longer sits on
+the OPS manager — it lives on each Career Associate (`staff.applicant_quota`,
+**default 25**). An OM sets every one of their CAs' limits straight from the OPS
+*Overview* table, and DEV/ADMIN can set any CA from *Data Sync → Per-CA applicant
+quota*. A new assignment is refused only when *that CA* is full (the dropdown
+greys out a full CA), so an OM is never frozen out by a number DEV picked. Re-
+attaching an applicant already on the CA does not double-count, and DEV/ADMIN may
+still exceed a limit to rebalance.
+
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 150 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 154 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
-                      # staff-directory seed + CA/OM sign-in scoping
+                      # staff-directory seed + CA/OM sign-in scoping + per-CA limits
 ```
 
 ---

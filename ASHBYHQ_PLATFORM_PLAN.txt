@@ -1149,7 +1149,9 @@ creates no staff row; linkCaManagers draws an edge only when both ends
 exist; the two sign-in joins filter on ap.ca_id / s.manager_id while the
 re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
-their own manager_id. 150 checks pass.
+their own manager_id. Applicant limits are enforced per-CA (their own OM
+sets each CA's cap, default 25) and the manager may only raise a limit for a
+CA under them. 154 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1185,5 +1187,34 @@ RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      'has no resume'. DATABASE_URL/POSTGRES_URL do not count - they are the
      platform's own database, and the CRM tables are not in them.
 
-END OF CURRENT-STATE DOC (v3.5) - previous v2 plan superseded; base
+====================================================================
+13. v3.6 - APPLICANT LIMITS MOVE FROM THE MANAGER TO THE CA
+====================================================================
+Previously DEV set a per-OPS applicant_quota and an assignment was blocked
+once the manager's own pool hit that cap - so a good OM could be frozen out
+by a number they did not choose. The operator asked to drop the manager cap
+and let OMs size their own CAs instead, starting at 25.
+
+  * THE RULE (not a setting): the cap now lives on the CA. staff.applicant_
+    quota keeps its column + DEFAULT 25, but it is read for a CA row, not an
+    OPS row. assignApplicantToCa calls caQuotaUsage(ca.uuid) and refuses only
+    when THAT CA is full; the old getQuotaUsage(actor.uuid) manager check is
+    gone. Re-attaching an applicant already on the CA does not double-count.
+    DEV/ADMIN may exceed a CA limit to rebalance; an OPS may not.
+  * WHO SETS IT: an OM sets each of their own CAs' limit from the OPS
+    Overview table (POST /api/ops/ca/:uuid/quota, guarded so a foreign
+    manager_id is refused). DEV/ADMIN can set any CA from the Data Sync
+    'Per-CA applicant quota' table (the old per-OPS panel, repointed).
+    listCasForManager now carries applicant_quota + a live assigned count so
+    both the OM table and the assignment dropdown show x/limit and grey out a
+    full CA.
+  * DEFAULT 25 holds everywhere: the column default, caQuotaUsage's ?? 25
+    fallback, and every input's placeholder all agree.
+
+verify:flow (step 7) asserts the four rule halves: an assignment is capped by
+the CA's own limit and NOT the manager's; a CA with no explicit limit defaults
+to 25; /api/ops/ca/:uuid/quota enforces the manager_id guard; and the OM
+Overview exposes the editable per-CA limit. 154 checks pass.
+
+END OF CURRENT-STATE DOC (v3.6) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.
