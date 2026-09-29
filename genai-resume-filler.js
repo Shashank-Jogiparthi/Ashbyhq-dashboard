@@ -183,7 +183,16 @@ const DERIVED_RULES = [
     resolve: (m, p) => get(m, 'full_name', 'name') || p?.personal?.name || '' },
   { re: /^(your\s+)?(personal|work)?\s*e[-\s]?mail(\s+address)?$/i, questionOnly: true,
     resolve: (m, p) => get(m, 'personal_email', 'email') || p?.personal?.email || '' },
-  { re: /^(phone|mobile|contact\s+number|callable\s+phone)$/i, questionOnly: true,
+  // Phone box in any of its label spellings - "Phone", "Phone Number",
+  // "Primary Phone", "Mobile Number", "Cell", "Contact Number", "WhatsApp",
+  // "Best Number", etc. The old pattern was ^phone|mobile|contact number|
+  // callable phone$ and a plain "Phone Number" box missed it, so the field fell
+  // through to the semantic mapper / GenAI - and when GenAI is quota-exhausted
+  // (HTTP 429) a phone number we already had in the CRM stranded as "needs
+  // input". Anchored to ^ and requiring a phone-core noun (or the phrase
+  // "contact number"), so an unrelated "…Number" box (Employee Number, Number
+  // of dependents) is NOT grabbed and keeps falling through as before.
+  { re: /^(?:your\s+|the\s+)?(?:primary\s+|alternate\s+|mobile\s+|cell\s+|work\s+|personal\s+|home\s+|office\s+|callable\s+|best\s+|preferred\s+|emergency\s+)?(?:phone|telephone|tel|mobile|cell|whatsapp)(?:\s*(?:number|no\.?|#))?\b|^(?:your\s+|the\s+)?contact\s+(?:number|no\.?|#)\b/i, questionOnly: true,
     resolve: (m, p) => get(m, 'callable_phone', 'phone', 'mobile') || p?.contact?.phone || p?.contact?.mobile || '' },
   { re: /authorized.{0,12}\bto\b.{0,8}work|eligib\w*.{0,12}\bto\b.{0,8}work|legally.{0,12}\bto\b.{0,8}work|work.{0,8}authoriz/i,
     resolve: (m) => yesNo(get(m, 'eligible_to_work_in_us', 'eligible to work in us', 'workAuthorization', 'visa_type') || (get(m, 'visa_type', 'workAuthorization') ? 'Yes' : '')) },

@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 154 checks pass.
+CA under them. 157 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1214,7 +1214,35 @@ and let OMs size their own CAs instead, starting at 25.
 verify:flow (step 7) asserts the four rule halves: an assignment is capped by
 the CA's own limit and NOT the manager's; a CA with no explicit limit defaults
 to 25; /api/ops/ca/:uuid/quota enforces the manager_id guard; and the OM
-Overview exposes the editable per-CA limit. 154 checks pass.
+Overview exposes the editable per-CA limit. 157 checks pass (see §14).
 
-END OF CURRENT-STATE DOC (v3.6) - previous v2 plan superseded; base
+====================================================================
+14. v3.6a - THE RECORD FILLS WHAT IT HAS, WITHOUT WAITING ON GENAI
+====================================================================
+An operator saw a "Phone Number" box left in "Needs your input" even though
+the CRM row carries the applicant's phone. The data WAS fetched and stored
+(connector mapCombined -> profile.contact.phone, surfaced in the record map as
+callable_phone); the miss was purely a RULE gap. The deterministic phone rule
+was /^(phone|mobile|contact number|callable phone)$/ with questionOnly, so the
+extremely common label "Phone Number" did not match and the field fell through
+to the semantic mapper and to GenAI - and with GenAI quota-exhausted (HTTP 429)
+every uncovered field collapses to "needs input" with the "GenAI unavailable"
+evidence. That is the whole explanation for why only ~5 fields pre-fill: a
+field is auto-filled deterministically only when a hand-written DERIVED_RULE
+recognises its wording AND the value is on record; anything else depends on
+the model, which is currently out of credit.
+
+  * THE RULE FIX (not a setting): the phone matcher now accepts its label
+    spellings - Phone, Phone Number, Primary/Mobile/Cell/Contact Number,
+    WhatsApp, Best Number, etc. - and reads contact.phone straight from the
+    record with NO API call. It stays anchored to ^ and demands a phone-core
+    noun (or the phrase "contact number"), so an unrelated "...Number" box
+    (Employee Number, Number of dependents) is NOT grabbed and still falls
+    through to the mapper / CA exactly as before.
+
+verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
+CRM phone with no GenAI, the common spellings all resolve, and an unrelated
+"…Number" / location box abstains. 157 checks pass.
+
+END OF CURRENT-STATE DOC (v3.6a) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

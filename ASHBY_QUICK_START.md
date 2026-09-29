@@ -336,13 +336,25 @@ greys out a full CA), so an OM is never frozen out by a number DEV picked. Re-
 attaching an applicant already on the CA does not double-count, and DEV/ADMIN may
 still exceed a limit to rebalance.
 
+**Why a field shows "Needs your input" instead of pre-filling.** A box is
+auto-filled *deterministically* only when a hand-written rule recognises its
+wording **and** the value is on the applicant's record. Everything else falls
+to the semantic mapper / GenAI — so when GenAI is out of credit (HTTP 429) those
+fields strand as "needs input" even when the CRM has the data. Phone Number hit
+exactly this: the number was stored (`contact.phone`) but the old rule only
+matched the bare label "Phone", so "Phone Number" never filled. The rule now
+covers its common spellings (Phone Number, Primary/Mobile/Cell/Contact Number,
+WhatsApp…) and reads the number straight from the record with no API call, while
+still refusing unrelated "…Number" boxes.
+
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 154 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 157 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits
+                      # + record-backed identity fields (phone) with no GenAI
 ```
 
 ---

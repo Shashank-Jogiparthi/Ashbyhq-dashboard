@@ -666,6 +666,25 @@ async function verifyLocationShapes() {
   shapeCheck('an email box is not a postal address', THREE_FORMS, 'What is your email address?', '');
 }
 
+// A phone number lives in the CRM record (contact.phone -> callable_phone), so
+// a "Phone Number" box must fill deterministically with NO GenAI call. It used
+// to strand as "needs input" whenever the model was quota-exhausted (429),
+// because the old rule only matched the exact label "Phone"/"Mobile".
+async function verifyIdentityFieldRules() {
+  step('3d. identity fields resolve from the record, not from GenAI');
+  const PHONE = '+1 919-555-0142';
+  const prof = { contact: { phone: PHONE }, raw: { client: { primary_phone: PHONE }, additional_information: {} } };
+  const map = buildRecordMap(prof);
+  const phoneOf = (q) => resolveDerived(box(q), map, prof) || '';
+  check('a plain "Phone Number" box fills from the CRM phone with no GenAI call',
+    phoneOf('Phone Number') === PHONE, phoneOf('Phone Number') || '(empty)');
+  check('the phone rule covers its common label spellings',
+    ['Phone', 'Mobile', 'Mobile Number', 'Primary Phone', 'Contact Number', 'Cell', 'WhatsApp', 'Your Phone Number']
+      .every((q) => phoneOf(q) === PHONE));
+  check('an unrelated "…Number" box is never grabbed as a phone',
+    phoneOf('Employee Number') === '' && phoneOf('Number of dependents') === '' && phoneOf('What is your work location?') === '');
+}
+
 async function verifyDevLog(appA) {
   step('4. DEV activity feed');
   const types = ['applicant_profile_fetched', 'link_scan_start', 'link_scan_done', 'draft_pass', 'ca_answers_edited', 'screenshots_uploaded', 'applicant_data_purged', 'run_success'];
@@ -846,6 +865,7 @@ try {
   const { appA } = await verifyApplicantAndPurge();
   await verifyHandBack(appA);
   await verifyLocationShapes();
+  await verifyIdentityFieldRules();
   await verifyDevLog(appA);
   await verifyCsvParser();
   await verifyStaffDirectory();
