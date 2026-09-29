@@ -387,13 +387,15 @@ best-effort — a capture or Storage failure never becomes a scan error), upload
 to Supabase Storage, and records it on the link row (`link_status='unavailable'` +
 `link_evidence_json`). The scan worker treats it as DONE (never retried, no draft
 pre-warm), the link leaves the unscanned backlog, and **the assigned CA sees the
-proof in their review pane** with APPLY locked and the page's own words as the
-reason — so nobody has to open the URL to learn why there is nothing to fill.
+proof as a small thumbnail on the queue card itself** (below the action buttons,
+same style as the run's acknowledgement image — not a big image inside "Review
+answers"), with APPLY locked and the page's own words as the reason — so nobody
+has to open the URL to learn why there is nothing to fill.
 
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 171 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 172 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits

@@ -284,6 +284,22 @@ function screenshotsHtml(a) {
   return '';
 }
 
+// A closed / removed posting is proven ON THE CARD (below the action buttons), as
+// a small thumbnail in the same .shot style as the run's acknowledgement image -
+// deliberately NOT inside the "Review answers" pane. The link row carries the
+// evidence { screenshot, reason }; when Storage was unavailable only the reason
+// text shows, which is still the proof of WHY there is nothing to fill.
+function unavailableProofHtml(a) {
+  if (a.link_status !== 'unavailable') return '';
+  let ev = null;
+  try { ev = a.link_evidence_json ? JSON.parse(a.link_evidence_json) : null; } catch { ev = null; }
+  const reason = ev?.reason || 'This job posting is closed or unavailable.';
+  const shot = ev?.screenshot
+    ? `<a href="${esc(ev.screenshot)}" target="_blank" rel="noopener" title="Open proof"><figure class="shot"><img src="${esc(ev.screenshot)}" alt="Job posting unavailable" loading="lazy" /><figcaption>posting unavailable</figcaption></figure></a>`
+    : '';
+  return `<div class="shots">${shot}<span class="muted small">⛔ ${esc(reason)}</span></div>`;
+}
+
 function queueCard(a, isCa) {
   const decided = a.status !== 'ASSIGNED';
   const reason = a.skip_reason || a.fail_reason;
@@ -307,6 +323,7 @@ function queueCard(a, isCa) {
         <input id="reason-input-${a.id}" placeholder="Reason for skipping (required)…" />
         <button id="reason-confirm-${a.id}">Confirm skip</button>
       </div>` : ''}
+    ${unavailableProofHtml(a)}
     ${isCa && decided ? `<div class="muted">Decision by CA on ${fmt(a.decision_at)}</div>` : ''}
   </div>`;
 }
@@ -369,19 +386,14 @@ function renderScanPending(a, data = {}) {
   const scanning = state === 'pre_scanning';
   const unavailable = state === 'unavailable';
   const canScan = ME && (ME.role === 'dev' || ME.role === 'admin');
-  const ev = data.linkEvidence || {};
   const headline = scanning
     ? '⏳ Pre-scan in progress — this job link is being opened now. This pane refreshes itself when the questions land.'
     : state === 'queued' ? '🕐 Pre-scan is queued — the background worker will open this link shortly, then answer what it can from the applicant profile.'
-      : unavailable ? '⛔ This job posting is closed or unavailable — there is no application form to fill, so APPLY stays locked. The screenshot below is the proof captured when the link was opened.'
+      : unavailable ? '⛔ This job posting is closed or unavailable — there is no application form to fill, so APPLY stays locked. The proof is shown on the card above.'
         : state === 'failed' ? '✗ The pre-scan of this link gave up after several attempts. A DEV can retry it from Data Sync.'
           : '⚠ This job link has no question inventory yet, so answers cannot be reviewed and APPLY stays locked.';
-  const evidenceHtml = unavailable
-    ? `${ev.screenshot ? `<div style="margin:10px 0;"><a href="${esc(ev.screenshot)}" target="_blank" rel="noopener"><img src="${esc(ev.screenshot)}" alt="Job posting unavailable" style="max-width:100%;max-height:420px;border:1px solid #ddd;border-radius:8px;"/></a></div>` : ''}${ev.reason ? `<div class="muted small">${esc(ev.reason)}</div>` : ''}`
-    : '';
   pane.innerHTML = `
     <div class="review-warn">${headline}</div>
-    ${evidenceHtml}
     ${canScan && !scanning && !unavailable ? `<div class="actions"><button id="scan-now-${a.id}">🔍 Pre-scan this link now</button><span class="muted small">hidden browser, once per link — every applicant on it reuses the result</span></div>` : ''}
     ${!canScan && !scanning && state !== 'queued' && !unavailable ? '<div class="muted small">A DEV/ADMIN can start or retry the pre-scan from the Data Sync tab.</div>' : ''}`;
   const btn = $(`scan-now-${a.id}`);

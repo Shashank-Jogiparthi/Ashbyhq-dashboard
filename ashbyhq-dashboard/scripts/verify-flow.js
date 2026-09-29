@@ -527,6 +527,11 @@ async function verifyCapabilityGate() {
   check('a closed posting surfaces to the assigned CA as scanState unavailable with the proof',
     /scanState: linkUnavailable \? 'unavailable'/.test(fs.readFileSync(SERVER_SCRIPT, 'utf8'))
       && /state === 'unavailable'/.test(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'app.js'), 'utf8')));
+  const appSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'app.js'), 'utf8');
+  check('the proof is a small thumbnail on the card (below the actions), not a big image in the Review pane',
+    /function unavailableProofHtml/.test(appSrc) && /\$\{unavailableProofHtml\(a\)\}/.test(appSrc)
+      && /class="shot"/.test(appSrc.slice(appSrc.indexOf('function unavailableProofHtml'), appSrc.indexOf('function queueCard')))
+      && !/evidenceHtml/.test(appSrc));
 
   const deadUrl = 'https://jobs.ashbyhq.com/verify/deaddead-dead-4ead-bead-deaddeaddead';
   const deadRow = await db.prepare(`INSERT INTO job_links (company, title, url, url_hash, link_status, seeded_at)

@@ -257,6 +257,11 @@ child.on('exit', async (code) => {
 
   const n = await saveJobLinkFields(linkId, fields);
   try { fs.unlinkSync(out); } catch { /* temp file only */ }
+  // A link that now scans as a real form is not unavailable, even if an earlier
+  // pass saw a "Job not found" page (the posting came back, or a force re-scan
+  // after a transient error). Clearing the flag stops the CA card showing a
+  // stale proof thumbnail over a form that now works.
+  await db.prepare("UPDATE job_links SET link_status = 'valid', link_evidence_json = NULL WHERE id = ? AND link_status = 'unavailable'").run(linkId);
 
   // Publish to the shared cache: one row per link, questions attached.
   const pushed = await upsertJobLinkQuestions({ url: link, questions: fields });
