@@ -309,9 +309,18 @@ is never invented. `seedStaffDirectory()` is idempotent (keyed on `ext_id`,
 emails stored lower-case) and fires on boot + full sync. When the CRM
 re-attaches an applicant to a different CA than a placeholder first guessed
 (AWL-25663 → Manusha Nune under balaji), her **live** applications re-point to
-the real CA but any SUCCESS row stays as history. Five `@applywizz.local`
-fixtures are retired (`active=0`, never deleted); the dev/testing rows you kept
-(shashank.dev, shashankjogiparthi, the priya.cam → rakesh pair) stay. The DEV
+the real CA but any SUCCESS row stays as history. Now that the real roster is
+in, the `@applywizz.local` fixtures are **purged, not merely retired**:
+`connector/staff-purge.js` keeps only staff whose email domain is exactly
+`@applywizz.com` / `@applywizz.ai` (the two real ADMINs included), first
+re-points any applicant a fixture still owns onto its real CRM CA (live apps
+follow, SUCCESS stays history), then **deletes** a fixture that owns nothing and
+**retires** (`active=0`) one still pinned by unresolvable work or history, so no
+FK can ever break. Run it from the ADMIN Staff tab's confirm-gated *Fixture
+cleanup* (preview → tick → apply), `POST /api/dev/staff/purge` (dry-run unless
+`apply:true`), or `node scripts/purge-local-staff.js --apply`; `npm run seed`
+now seeds the real tree and purges, so a fresh checkout never re-creates a
+fixture. The DEV
 pane reads it at *Staff tree* (`/api/dev/staff/tree`) with a live
 `staffDirectoryStats()`. If the CRM names a CA outside the roster it is shown
 as `tree_unresolved` — that applicant gets its OM but no CA until you add the
@@ -395,7 +404,7 @@ has to open the URL to learn why there is nothing to fill.
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 172 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 184 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits

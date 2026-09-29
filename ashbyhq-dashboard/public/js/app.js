@@ -1348,6 +1348,15 @@ async function renderDevStaff() {
     <p class="muted" style="margin:0 0 12px;">${isAdmin
       ? 'As <b>ADMIN</b> you can move a CA between OPS managers, change any member’s role, and permanently remove a member from the organisation. Every destructive action is confirm-gated — nothing happens until you tick the box.'
       : 'To move a CA to a different OPS manager: pick the new OPS in the dropdown, tick <b>Confirm change</b>, then Save. Nothing is saved until you confirm — pick the same OPS back (or Revert) to cancel.'}</p>
+    ${isAdmin ? `<div style="margin:0 0 14px;padding:10px 12px;border:1px solid #ddd;border-radius:8px;background:#fafafa;">
+      <b>Fixture cleanup</b> <span class="muted">— remove every non-@applywizz staff row (the fake @applywizz.local admin / CA / OM / DEV). The real @applywizz.com and @applywizz.ai people, ADMINs included, are always kept.</span>
+      <div class="actions" style="margin-top:8px;">
+        <button data-purge-preview>Preview cleanup</button>
+        <label id="purge-confirm-wrap" style="display:none;gap:6px;align-items:center;cursor:pointer;"><input type="checkbox" id="purge-confirm" style="width:auto;"> Apply for real (delete / retire)</label>
+        <button class="danger" id="purge-apply" data-purge-apply disabled>Run purge</button>
+      </div>
+      <div id="purge-report" class="muted" style="margin-top:8px;font-size:12px;"></div>
+    </div>` : ''}
     ${tableHtml(headers, rows)}`;
 
   /* ---- OPS reassignment (DEV + ADMIN): confirm-gated ---- */
@@ -1414,6 +1423,44 @@ async function renderDevStaff() {
         reset();
       }
     });
+  });
+
+  /* ---- FIXTURE CLEANUP (ADMIN only): preview (dry run) then confirm-gated apply ---- */
+  const previewBtn = $('view').querySelector('[data-purge-preview]');
+  const applyBtn = $('view').querySelector('[data-purge-apply]');
+  const confirmWrap = $('view').querySelector('#purge-confirm-wrap');
+  const confirmChk = $('view').querySelector('#purge-confirm');
+  const reportBox = $('view').querySelector('#purge-report');
+  const renderPurge = (r, dry) => {
+    const head = dry
+      ? `Dry run — ${r.doomed} fixture(s) found; would delete ${r.wouldDelete}, retire ${r.wouldRetire}. ${r.reassignable} applicant(s) can be re-pointed to their real CA.`
+      : `Done — deleted ${r.deleted.length}, retired ${r.retired.length}, re-pointed ${r.reassignable} applicant(s). Kept ${r.kept} @applywizz staff.`;
+    const items = dry
+      ? (r.projection || []).map((p) => ({ ...p, fate: p.fate }))
+      : [...(r.deleted || []).map((d) => ({ ...d, fate: 'delete' })), ...(r.retired || []).map((x) => ({ ...x, fate: 'retire' }))];
+    const body = items.length
+      ? items.map((p) => `<div>${p.fate.toUpperCase()} · ${p.role.toUpperCase()} · <span class="mono">${esc(p.email)}</span>${p.reason === 'still-referenced' ? ' <span class="muted">(still owns work/history — retired)</span>' : ''}</div>`).join('')
+      : '<div>Nothing to remove — the directory is already CRM-only.</div>';
+    reportBox.innerHTML = `<div style="font-weight:600;color:#111;">${head}</div>${body}`;
+  };
+  previewBtn?.addEventListener('click', async () => {
+    reportBox.textContent = 'Scanning…';
+    try {
+      const { report } = await api('/api/dev/staff/purge', { method: 'POST', body: JSON.stringify({}) });
+      renderPurge(report, true);
+      if (report.doomed > 0) confirmWrap.style.display = 'inline-flex';
+    } catch (err) { reportBox.textContent = err.message; }
+  });
+  confirmChk?.addEventListener('change', () => { applyBtn.disabled = !confirmChk.checked; });
+  applyBtn?.addEventListener('click', async () => {
+    if (!confirmChk.checked) return;
+    applyBtn.disabled = true; reportBox.textContent = 'Purging…';
+    try {
+      const { report } = await api('/api/dev/staff/purge', { method: 'POST', body: JSON.stringify({ apply: true }) });
+      renderPurge(report, false);
+      toast(`Cleanup applied — ${report.deleted.length} removed, ${report.retired.length} retired.`);
+      setTimeout(() => renderDevStaff(), 600);
+    } catch (err) { toast(err.message, true); reportBox.textContent = err.message; applyBtn.disabled = false; }
   });
 
   /* ---- REMOVAL (ADMIN only): impact preview + reassign + typed confirm ---- */

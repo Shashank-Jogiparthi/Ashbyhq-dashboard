@@ -86,6 +86,8 @@ const SERVER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '.
 const CRM_CONFIG_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'connector', 'azure-config.js');
 const SCAN_WORKER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'link-scanner.js');
 const PAGE_EVIDENCE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'core', 'page-evidence.js');
+const STAFF_PURGE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'connector', 'staff-purge.js');
+const SEED_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'seed.js');
 function runScanScript(url, env) {
   return runChild(SCAN_SCRIPT, [url], env);
 }
@@ -921,6 +923,68 @@ async function verifyStaffDirectory() {
     /\/api\/ops\/ca\/:uuid\/quota[\s\S]{0,360}ca\.manager_id !== req\.user\.uuid/.test(serverSrc));
   check('the manager Overview exposes an editable per-CA applicant limit',
     /data-ca-quota-save/.test(appSrc) && /\/api\/ops\/ca\/\$\{uuid\}\/quota/.test(appSrc));
+
+  /* ---- Staff purge: the directory is the CRM, fixtures go away ---- */
+  const purgeSrc = fs.readFileSync(STAFF_PURGE_SCRIPT, 'utf8');
+  const seedSrc = fs.readFileSync(SEED_SCRIPT, 'utf8');
+  const purge = await import('../connector/staff-purge.js');
+  check('isApplywizzEmail keeps ONLY the exact applywizz.com / applywizz.ai domains',
+    purge.isApplywizzEmail('a@applywizz.ai') && purge.isApplywizzEmail('A@ApplyWizz.COM')
+      && !purge.isApplywizzEmail('a@applywizz.local') && !purge.isApplywizzEmail('a@evilapplywizz.ai')
+      && !purge.isApplywizzEmail('a@applywizz.community') && !purge.isApplywizzEmail('no-at-sign'));
+  check('the purge deletes a clean fixture and retires a referenced one (never breaks an FK)',
+    /DELETE FROM staff WHERE uuid/.test(purgeSrc) && /SET active = 0 WHERE uuid/.test(purgeSrc)
+      && /status <> 'SUCCESS'/.test(purgeSrc));
+  check('seed.js now provisions the real directory + purges fixtures (inserts no @.local login)',
+    /purgeLocalStaff/.test(seedSrc) && !/INSERT INTO staff/.test(seedSrc));
+  check('the DEV purge endpoint defaults to dry-run (mutates only when told apply)',
+    /\/api\/dev\/staff\/purge/.test(serverSrc) && /req\.body\.apply !== true/.test(serverSrc));
+
+  // Round-trip on the shared DB with synthetic rows, isolated + torn down here.
+  const KCA = 'verify-purge-kca', DCA = 'verify-purge-dca', DDEV = 'verify-purge-ddev';
+  const AWL_P = 'AWL-VERIFY-PURGE', nowF = nowIso();
+  try {
+    const mk = (u, email, role) => db.prepare(
+      'INSERT INTO staff (uuid, email, name, role, manager_id, applicant_quota, active, last_sign_in, created_at) VALUES (?, ?, \'VP\', ?, NULL, 25, 1, NULL, ?)'
+    ).run(u, email, role, nowF);
+    await mk(KCA, 'verify-purge-keep@applywizz.ai', 'ca');   // a REAL person (kept)
+    await mk(DCA, 'verify-purge-doom@applywizz.local', 'ca');  // a fixture (doomed)
+    await mk(DDEV, 'verify-purge-dev@applywizz.local', 'dev'); // a fixture owning nothing
+    await db.prepare('INSERT INTO applicants (awl_id, full_name, email, ca_id) VALUES (?, ?, ?, ?) ON CONFLICT (awl_id) DO UPDATE SET ca_id = EXCLUDED.ca_id')
+      .run(AWL_P, 'VP', 'vp@invalid.local', DCA);
+    const linkS = await makeLink(URL_A);   // history lives here
+    const linkQ = await makeLink(URL_B);   // live work lives here
+    await db.prepare('INSERT INTO applications (awl_id, link_id, ca_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (awl_id, link_id) DO UPDATE SET status = EXCLUDED.status, ca_id = EXCLUDED.ca_id')
+      .run(AWL_P, linkS, DCA, 'SUCCESS', nowF, nowF);
+    await db.prepare('INSERT INTO applications (awl_id, link_id, ca_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (awl_id, link_id) DO UPDATE SET status = EXCLUDED.status, ca_id = EXCLUDED.ca_id')
+      .run(AWL_P, linkQ, DCA, 'QUEUED', nowF, nowF);
+
+    const rep = await purge.purgeLocalStaff({
+      resolveApplicant: async (app) => (app.awl_id === AWL_P ? { caId: KCA, opsId: null } : null),
+      onlyUuids: new Set([DCA, DDEV]),   // never touch anyone else's fixture on the shared DB
+      dryRun: false, actor: 'verify'
+    });
+    const ap = await db.prepare('SELECT ca_id FROM applicants WHERE awl_id = ?').get(AWL_P);
+    check('a fixture-owned applicant is re-pointed onto its real CRM CA', ap.ca_id === KCA);
+    const q = await db.prepare('SELECT ca_id FROM applications WHERE awl_id = ? AND link_id = ?').get(AWL_P, linkQ);
+    check('the open (QUEUED) application follows the applicant to the real CA', q.ca_id === KCA);
+    const s = await db.prepare('SELECT ca_id FROM applications WHERE awl_id = ? AND link_id = ?').get(AWL_P, linkS);
+    check('SUCCESS history still points at the old fixture (never rewritten)', s.ca_id === DCA);
+    const dca = await db.prepare('SELECT active FROM staff WHERE uuid = ?').get(DCA);
+    check('a fixture still pinned by SUCCESS history is RETIRED (active=0), not deleted', Boolean(dca) && Number(dca.active) === 0);
+    check('a fixture that owns nothing is DELETED outright', !(await db.prepare('SELECT uuid FROM staff WHERE uuid = ?').get(DDEV)));
+    check('a real @applywizz staff row is never touched', Boolean(await db.prepare('SELECT uuid FROM staff WHERE uuid = ?').get(KCA)));
+    const activeLocal = await db.prepare("SELECT COUNT(*) AS n FROM staff WHERE active = 1 AND uuid IN (?, ?)").get(DCA, DDEV);
+    check('after the purge neither doomed fixture is an active signer-in', Number(activeLocal.n) === 0, String(activeLocal.n));
+    const rep2 = await purge.purgeLocalStaff({ resolveApplicant: async () => null, onlyUuids: new Set([DCA, DDEV]), dryRun: false, actor: 'verify' });
+    check('the purge is idempotent - a second run deletes nobody new (the fixture stays retired)',
+      !rep2.deleted.some((d) => d.uuid === DCA) && rep2.retired.some((r) => r.uuid === DCA));
+  } finally {
+    await db.prepare('DELETE FROM application_events WHERE application_id IN (SELECT id FROM applications WHERE awl_id = ?)').run(AWL_P);
+    await db.prepare('DELETE FROM applications WHERE awl_id = ?').run(AWL_P);
+    await db.prepare('DELETE FROM applicants WHERE awl_id = ?').run(AWL_P);
+    await db.prepare('DELETE FROM staff WHERE uuid IN (?, ?, ?)').run(KCA, DCA, DDEV);
+  }
 }
 
 async function verifyCrmFetch() {

@@ -55,8 +55,9 @@ import { describeConnectorEnv } from './core/applicant-source.js';
 import * as worker from './worker/runner.js';
 import { enqueueLinkScans, scanQueueState, scanStateForUrl, start as startScanWorker } from './worker/link-scanner.js';
 import { checkBrowser } from './core/browser-check.js';
-import { syncFromPostgres, syncApplicantByAwl, ingestDocument, normalizeAwlId, isConfigured as connectorConfigured, buildStaffTree } from './connector/applicant-db.js';
+import { syncFromPostgres, syncApplicantByAwl, ingestDocument, normalizeAwlId, isConfigured as connectorConfigured, buildStaffTree, buildAwlCaIndex } from './connector/applicant-db.js';
 import { staffDirectoryStats } from './connector/staff-directory.js';
+import { purgeLocalStaff } from './connector/staff-purge.js';
 import { runDraftPass, buildReviewQuestions } from './draft-service.js';
 import {
   listFieldAnswers,
@@ -620,6 +621,21 @@ app.post('/api/dev/sync', requireAuth, requireRole('dev', 'admin'), wrap(async (
   // A sync can bring in links nobody has scanned yet — same rule as ingestion:
   // every assigned link must end up with a cached question inventory.
   return { sync, scan: await queueUnscannedLinks('sync') };
+}));
+
+// Purge every staff fixture that is NOT a real @applywizz.com/.ai person. A
+// full CRM /api/dev/sync already re-points applicants onto their real CA, so
+// this is the cleanup that removes the leftover @applywizz.local admin/CA/OM/DEV
+// rows. DRY RUN unless apply:true is sent: a dry run only reports the projected
+// fate, it writes nothing. A doomed row that STILL owns unresolvable work or
+// SUCCESS history is retired (active=0), never force-deleted, so no FK breaks.
+app.post('/api/dev/staff/purge', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => {
+  const dryRun = req.body.apply !== true;
+  const index = await buildAwlCaIndex();          // null when no CRM here
+  const resolveApplicant = index
+    ? async (app) => index.get(normalizeAwlId(app.awl_id)) || null
+    : null;
+  return { report: await purgeLocalStaff({ resolveApplicant, dryRun, actor: req.user.uuid }) };
 }));
 
 // Load one exported applicant document (the { client, additional_information } shape).

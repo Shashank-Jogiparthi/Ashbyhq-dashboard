@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 172 checks pass.
+CA under them. 184 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1214,7 +1214,7 @@ and let OMs size their own CAs instead, starting at 25.
 verify:flow (step 7) asserts the four rule halves: an assignment is capped by
 the CA's own limit and NOT the manager's; a CA with no explicit limit defaults
 to 25; /api/ops/ca/:uuid/quota enforces the manager_id guard; and the OM
-Overview exposes the editable per-CA limit. 172 checks pass (see §14).
+Overview exposes the editable per-CA limit. 184 checks pass (see §14).
 
 ====================================================================
 14. v3.6a - THE RECORD FILLS WHAT IT HAS, WITHOUT WAITING ON GENAI
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 172 checks pass.
+"…Number" / location box abstains. 184 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,7 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 172 checks pass.
+watchdog kills + frees the slot. 184 checks pass.
 
 ====================================================================
 16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
@@ -1325,7 +1325,54 @@ RULE (not a setting), asserted in verify:flow step 3b:
 This is the one scan path that opens a browser purely to photograph a page: it runs
 only for a link that genuinely needs a page load to be called dead, and it is the
 image that settles "why can't I apply?" without a human having to visit the URL.
-172 checks pass.
 
-END OF CURRENT-STATE DOC (v3.6c) - previous v2 plan superseded; base
+====================================================================
+17. v3.6d - THE STAFF DIRECTORY IS THE CRM, NOTHING ELSE
+====================================================================
+The platform was built on @applywizz.local sign-in fixtures (a fake ADMIN, a
+priya.cam -> rakesh OPS->CA test pair, a throwaway DEV). Once the real
+59-CA / 2-OPS / 2-ADMIN roster is seeded and every applicant is re-pointed onto
+its real CRM CA, those fixtures are pure noise - a CA signs in and sees phantom
+colleagues. The operator asked for them gone, keeping ONLY the addresses that
+end @applywizz.com / @applywizz.ai (which already includes both ADMINs).
+
+Two hard facts shaped the rule: (1) applicants.ca_id/ops_id, applications.ca_id/
+manager_id and staff.manager_id all reference staff(uuid) with no ON DELETE, so
+a fixture that still OWNS anything cannot simply be deleted; (2) the operator's
+own @.local dev login is exactly the kind of row the whitelist removes.
+
+RULE (not a setting), asserted in verify:flow step 7:
+  * connector/staff-purge.js purgeLocalStaff(): a staff row survives IFF its
+    email domain is EXACTLY applywizz.com or applywizz.ai (isApplywizzEmail -
+    it rejects evilapplywizz.ai and applywizz.community, not just the prefix).
+    Everything else is doomed.
+  * A doomed-owned applicant is FIRST re-pointed to its real CRM CA/OM via an
+    injected resolver (applicant-db.js buildAwlCaIndex() reads career_associate_id
+    / career_associate_manager_id from clients_additional_info in ONE query and
+    matches them onto staff by ext_id - the same read resolveTree uses, so the
+    purge module itself opens no Postgres pool). Live (non-SUCCESS) applications
+    follow the applicant; SUCCESS rows stay as history.
+  * A doomed row is DELETED only once nothing references it (sessions + its otp
+    go with it); a doomed row still pinned by unresolvable work or SUCCESS
+    history is RETIRED (active=0), NEVER force-deleted, so no FK can break and no
+    live work is orphaned. Doomed->doomed manager edges are detached first.
+    Idempotent: re-running finds nothing left to purge.
+  * Wiring: DEV/ADMIN POST /api/dev/staff/purge is DRY RUN unless apply:true
+    (reports each doomed row's projected fate without writing); the ADMIN Staff
+    tab gained a confirm-gated "Fixture cleanup" (preview -> tick -> run);
+    scripts/purge-local-staff.js does the same from a shell (--apply). scripts/
+    seed.js NO LONGER inserts @.local logins - it builds the real tree and then
+    purges, so a fresh checkout can never re-introduce a phantom colleague.
+  * The recommended order on the live host: run a full CRM /api/dev/sync first
+    (re-points every applicant and materialises their links), THEN purge; but a
+    purge run standalone still moves every applicant the CRM can resolve and
+    merely retires the rest, so it is never destructive to real data.
+
+One consequence the operator accepted: the whitelist also removes the old
+@applywizz.local DEV/admin-style logins. The two real ADMINs (@applywizz.ai)
+always remain, and DEV sign-up stays open, so access is never globally lost -
+but a re-created login should use an @applywizz.com/.ai address to survive the
+next cleanup. 184 checks pass.
+
+END OF CURRENT-STATE DOC (v3.6d) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

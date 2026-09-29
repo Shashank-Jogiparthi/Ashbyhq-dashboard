@@ -95,9 +95,11 @@ export const ADMIN_ROSTER = [
 ];
 
 // Legacy @applywizz.local test fixtures. These are NOT part of the real CRM
-// tree; five of them are retired (active=0, never deleted - history FKs stay).
-// Kept intentionally: shashank.dev + shashankjogiparthi (dev access), and the
-// priya.cam -> rakesh CAM/CA pair the operator wants to retain for testing.
+// tree. seedStaffDirectory() still retires them (active=0) so a host that has
+// not run the purge keeps them out of sign-in; the actual removal is the staff
+// purge (connector/staff-purge.js): a fixture that owns nothing is DELETED, and
+// one still pinned by unresolvable work or SUCCESS history is RETIRED so no
+// foreign key ever breaks. The real @applywizz.com/.ai staff are always kept.
 export const FIXTURES_TO_RETIRE = [
   'admin2026@applywizz.local',
   'sana@applywizz.local',

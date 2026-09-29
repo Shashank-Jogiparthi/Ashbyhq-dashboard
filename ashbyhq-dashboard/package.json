@@ -7,6 +7,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "seed": "node scripts/seed.js",
+    "purge:staff": "node scripts/purge-local-staff.js",
     "setup:storage": "node scripts/setup-storage.js",
     "storage:check": "node scripts/check-storage.js",
     "verify:flow": "node scripts/verify-flow.js",

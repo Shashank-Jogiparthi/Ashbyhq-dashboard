@@ -234,6 +234,36 @@ export async function buildStaffTree() {
   }
 }
 
+// One-shot AWL-ID -> { caId, opsId } index over the CRM's reporting columns, so
+// the staff purge can re-point a fixture-owned applicant onto its REAL CA
+// without opening a pool per row. Returns null when no CRM is configured. A
+// uuid the roster has no staff row for resolves to null (never fabricated),
+// exactly like resolveTree. READ-ONLY: it draws no edges and mutates nothing.
+export async function buildAwlCaIndex() {
+  const cfg = pgConfig();
+  if (!cfg) return null;
+  const pg = await getPg();
+  const pool = new pg.Pool(cfg);
+  try {
+    const { rows } = await pool.query(
+      `SELECT applywizz_id, career_associate_id, career_associate_manager_id FROM ${INFO_TABLE()} WHERE applywizz_id IS NOT NULL`
+    );
+    const idx = new Map();
+    for (const r of rows) {
+      const awl = normalizeAwlId(r.applywizz_id);
+      if (!awl) continue;
+      const caExt = String(r.career_associate_id || r.careerassociateid || '').trim();
+      const omExt = String(r.career_associate_manager_id || r.careerassociatemanagerid || '').trim();
+      const ca = caExt ? await findStaffByExtId(caExt) : null;
+      const om = omExt ? await findStaffByExtId(omExt) : null;
+      idx.set(awl, { caId: ca?.uuid ?? null, opsId: om?.uuid ?? null });
+    }
+    return idx;
+  } finally {
+    await pool.end().catch(() => {});
+  }
+}
+
 // Pull the two tables (optionally filtered to a single AWL-ID), join in JS on
 // applywizz_id, and stream every applicant into the local store.
 export async function syncFromPostgres({ opsId = null, awlId = null } = {}) {
