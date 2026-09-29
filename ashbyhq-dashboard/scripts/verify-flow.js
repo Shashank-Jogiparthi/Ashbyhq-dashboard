@@ -55,7 +55,8 @@ import {
   requeueFailedScanJobs, scanJobCounts, getScanJobByUrl, listEvents,
   purgeApplicantFormData, applicantNeedsProfile, logEvent, upsertFieldAnswer,
   listFieldAnswers, hasBlockingMissingFacts, saveJobLinkFields, applyCaEdits,
-  handBackToQueue, listQueuedForWorker, claimForRun
+  handBackToQueue, listQueuedForWorker, claimForRun,
+  setLinkUnavailable, getJobLinkByUrl
 } from '../db/store.js';
 import { scanStateForUrl } from '../worker/link-scanner.js';
 import { browserState, canDriveBrowsers } from '../core/browser-check.js';
@@ -83,6 +84,8 @@ const RUNNER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '.
 const STORE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'db', 'store.js');
 const SERVER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.js');
 const CRM_CONFIG_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'connector', 'azure-config.js');
+const SCAN_WORKER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'link-scanner.js');
+const PAGE_EVIDENCE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'core', 'page-evidence.js');
 function runScanScript(url, env) {
   return runChild(SCAN_SCRIPT, [url], env);
 }
@@ -490,6 +493,56 @@ async function verifyCapabilityGate() {
     inventoryIsResidue(formFields(1), URL_A) && !inventoryIsResidue(formFields(1), `${URL_A}/application`));
   check('every refusal carries a sentence a DEV can act on',
     [listing, notFound].every((v) => typeof v.why === 'string' && v.why.length > 15));
+
+  // A CLOSED / REMOVED posting is its own class, decided BEFORE the empty-fields
+  // short-circuit: Ashby's "Job not found" page legitimately has zero form fields,
+  // and the page's own words are what make it a *gone* link (proof + notify the CA)
+  // rather than a generic scan that found nothing (a DEV re-runs it).
+  const gone = judgeScan({ posting: { h1: 'Job not found', docTitle: 'Job not found', jobTitle: '', headingAttr: '' }, fields: [] }, URL_A);
+  check('a "Job not found" page is named posting_gone, not a generic empty scan',
+    gone.ok === false && gone.kind === 'posting_gone', gone.why);
+  const expired = judgeScan({ posting: { h1: 'Data Engineer', docTitle: 'This posting has expired', jobTitle: '', headingAttr: '' }, fields: formFields(2) }, URL_A);
+  check('an expired posting is posting_gone even when it shows stray fields',
+    expired.ok === false && expired.kind === 'posting_gone', expired.why);
+  check('a job listing is classified as listing, never as a closed posting',
+    listing.kind === 'listing' && gone.kind !== 'listing');
+  check('a plain no-fields page is NOT mistaken for a closed posting',
+    judgeScan({ posting: goodPosting, fields: [] }, URL_A).kind === 'no_fields');
+
+  // The proof path, wired end to end. verify:flow never launches a browser, so
+  // the capture itself is asserted by source; the persistence is a real round-trip.
+  const scanSrc = fs.readFileSync(SCAN_SCRIPT, 'utf8');
+  const scanWorkerSrc = fs.readFileSync(SCAN_WORKER_SCRIPT, 'utf8');
+  const evidenceSrc = fs.readFileSync(PAGE_EVIDENCE_SCRIPT, 'utf8');
+  check('a closed posting captures a proof shot, records it, then exits resolved (not a retry)',
+    /verdict\.kind === 'posting_gone'/.test(scanSrc) && /capturePageEvidence\(/.test(scanSrc)
+      && /setLinkUnavailable\(/.test(scanSrc) && /POSTING_UNAVAILABLE:/.test(scanSrc)
+      && /process\.exit\(0\)/.test(scanSrc));
+  check('the proof module folds every failure into a return value and never throws',
+    /return \{ ok: false/.test(evidenceSrc) && /finally/.test(evidenceSrc) && /fullPage: true/.test(evidenceSrc));
+  check('the scan worker treats a closed posting as terminal (DONE, no draft pre-warm, its own event)',
+    /POSTING_UNAVAILABLE/.test(scanWorkerSrc) && /via = unavailable \? 'posting-gone'/.test(scanWorkerSrc)
+      && /unavailable \? null : await prewarmDrafts/.test(scanWorkerSrc)
+      && /link_posting_unavailable/.test(scanWorkerSrc));
+  check('a closed posting surfaces to the assigned CA as scanState unavailable with the proof',
+    /scanState: linkUnavailable \? 'unavailable'/.test(fs.readFileSync(SERVER_SCRIPT, 'utf8'))
+      && /state === 'unavailable'/.test(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'app.js'), 'utf8')));
+
+  const deadUrl = 'https://jobs.ashbyhq.com/verify/deaddead-dead-4ead-bead-deaddeaddead';
+  const deadRow = await db.prepare(`INSERT INTO job_links (company, title, url, url_hash, link_status, seeded_at)
+    VALUES ('Verify', 'Role', ?, ?, 'valid', ?) RETURNING id`).get(deadUrl, deadUrl, nowIso());
+  try {
+    await setLinkUnavailable(deadRow.id, { screenshotUrl: 'https://example.test/proof.png', reason: 'the job posting is closed' });
+    const dead = await getJobLinkByUrl(deadUrl);
+    const evv = JSON.parse(dead.link_evidence_json || '{}');
+    check('setLinkUnavailable flips link_status and stores the proof on the link row',
+      dead.link_status === 'unavailable' && evv.screenshot === 'https://example.test/proof.png' && /closed/.test(evv.reason));
+    const { listUnscannedLinks } = await import('../db/store.js');
+    check('a closed link leaves the scan backlog so it is never re-scanned on a loop',
+      !(await listUnscannedLinks()).some((l) => l.url === deadUrl));
+  } finally {
+    await db.prepare('DELETE FROM job_links WHERE url = ?').run(deadUrl);
+  }
 
   // Cache-only mode: the real script, driven as a browserless host drives it.
   const cacheOnly = await runScanScript(URL_C, { SCAN_NO_BROWSER: 'true' });

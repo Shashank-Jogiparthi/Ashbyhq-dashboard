@@ -179,11 +179,18 @@ async function run(job) {
   // scan-link.js reports its tier in one of three phrasings; the field count is
   // what the DEV table shows, so grab it whichever way it was written.
   const fields = Number(out.match(/(?:Stored|Restored|Already scanned:)\D*(\d+)\s*field/)?.[1] || 0);
+  // A CLOSED / REMOVED posting. scan-link.js already captured the proof, recorded
+  // it on the link row and exited 0, so this is a resolved outcome, not a failure:
+  // the row goes DONE (never retried) and the draft pre-warm is skipped because
+  // there is no form to answer. The assigned CA reads the screenshot in the pane.
+  const unavailable = /POSTING_UNAVAILABLE/.test(out);
+  const unavailableReason = (out.match(/POSTING_UNAVAILABLE:\s*(.+)/) || [])[1]?.trim().slice(0, 300) || '';
   // Where the inventory came from. "✓ scanned in 8s" is a cache answer, not a
   // browser scan, and a DEV reading the table deserves to know which one happened.
-  const via = /Already scanned:/.test(out) ? 'local-cache'
-    : /Restored \d+ field\(s\) from public\.ashby_joblink_questions/.test(out) ? 'shared-cache'
-      : 'browser';
+  const via = unavailable ? 'posting-gone'
+    : /Already scanned:/.test(out) ? 'local-cache'
+      : /Restored \d+ field\(s\) from public\.ashby_joblink_questions/.test(out) ? 'shared-cache'
+        : 'browser';
   // This host had no browser and the link needed one: not a failure, and above
   // all not an attempt. The row goes back untouched for a capable host.
   const needsBrowser = !browserOk && (/NEEDS_BROWSER/.test(out) || outcome.exitCode === 3);
@@ -208,11 +215,18 @@ async function run(job) {
     if (!needsBrowser) await markScanJobDuration(job.id, durationMs);
 
     if (ok) {
-      const warmed = await prewarmDrafts(url);
-      await logEvent(null, 'link_scan_done', 'scan-worker', {
-        url, fields, via, seconds: Math.round(durationMs / 1000), attempt: job.attempts, prewarm: warmed || null
-      });
-      log(`done (${fields || '?'} fields via ${via}, ${Math.round(durationMs / 1000)}s${warmed ? `, drafted ${warmed.apps} applicant(s)` : ''}): ${url}`);
+      const warmed = unavailable ? null : await prewarmDrafts(url);
+      if (unavailable) {
+        await logEvent(null, 'link_posting_unavailable', 'scan-worker', {
+          url, reason: unavailableReason, host: browserState('scan').host, attempt: job.attempts
+        });
+        log(`posting unavailable (closed/removed) - proof recorded for the assigned CA(s): ${url}`);
+      } else {
+        await logEvent(null, 'link_scan_done', 'scan-worker', {
+          url, fields, via, seconds: Math.round(durationMs / 1000), attempt: job.attempts, prewarm: warmed || null
+        });
+        log(`done (${fields || '?'} fields via ${via}, ${Math.round(durationMs / 1000)}s${warmed ? `, drafted ${warmed.apps} applicant(s)` : ''}): ${url}`);
+      }
     } else if (needsBrowser) {
       await logEvent(null, 'link_scan_deferred', 'scan-worker', { url, error: errorText, host: browserState('scan').host });
       log(`deferred (no browser here): ${url}`);

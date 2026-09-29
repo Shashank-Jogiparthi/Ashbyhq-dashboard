@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 161 checks pass.
+CA under them. 171 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1214,7 +1214,7 @@ and let OMs size their own CAs instead, starting at 25.
 verify:flow (step 7) asserts the four rule halves: an assignment is capped by
 the CA's own limit and NOT the manager's; a CA with no explicit limit defaults
 to 25; /api/ops/ca/:uuid/quota enforces the manager_id guard; and the OM
-Overview exposes the editable per-CA limit. 161 checks pass (see §14).
+Overview exposes the editable per-CA limit. 171 checks pass (see §14).
 
 ====================================================================
 14. v3.6a - THE RECORD FILLS WHAT IT HAS, WITHOUT WAITING ON GENAI
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 161 checks pass.
+"…Number" / location box abstains. 171 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,43 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 161 checks pass.
+watchdog kills + frees the slot. 171 checks pass.
 
-END OF CURRENT-STATE DOC (v3.6b) - previous v2 plan superseded; base
+====================================================================
+16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
+====================================================================
+An operator listed a job link (CSV / ingest) whose posting had since been taken
+down - Ashby renders "Job not found / The job you requested was not found" (e.g.
+https://jobs.ashbyhq.com/whoop/88692663-be11-4797-b458-b3452e173218). That page
+loads cleanly and exposes ZERO application fields, so the old verdict lumped it in
+with "a scan that found nothing" and parked it FAILED for a DEV to retry forever.
+But a removed posting is a real, TERMINAL fact about the LINK - the correct action
+is to prove it and tell the assigned CA, not to hammer it.
+
+RULE (not a setting), asserted in verify:flow step 3b:
+  * core/scan-verdict.js now splits the old NOT_FORM_RE into two named classes and
+    judgeScan returns a `kind`. A closed/removed/expired page is `posting_gone`
+    (matched on the page's own words BEFORE the empty-fields short-circuit); a
+    careers list is still `listing`; a genuinely blank form is `no_fields`. The
+    three have different owners, so they must not share one verdict.
+  * On `posting_gone`, scripts/scan-link.js captures a full-page proof with
+    core/page-evidence.js (headless Playwright, best-effort - a capture or Storage
+    failure NEVER turns into a scan error), uploads it to Supabase Storage, and
+    records { screenshot, reason, captured_at } on the link row via
+    store.setLinkUnavailable (link_status='unavailable', new link_evidence_json
+    column). It then prints POSTING_UNAVAILABLE and exits 0 - resolved, not failed.
+  * The scan worker treats that as terminal: the row goes DONE with scan_via
+    'posting-gone', the draft pre-warm is SKIPPED (there is no form to answer), and
+    a link_posting_unavailable event is logged. A closed link also drops out of the
+    unscanned backlog, so it is never re-queued on a loop.
+  * The assigned CA sees WHY their application is stuck: the review pane shows
+    scanState 'unavailable' with the proof screenshot + the page's own words, and
+    APPLY stays locked. The queue card already flags "link unavailable".
+
+This is the one scan path that opens a browser purely to photograph a page: it runs
+only for a link that genuinely needs a page load to be called dead, and it is the
+image that settles "why can't I apply?" without a human having to visit the URL.
+171 checks pass.
+
+END OF CURRENT-STATE DOC (v3.6c) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

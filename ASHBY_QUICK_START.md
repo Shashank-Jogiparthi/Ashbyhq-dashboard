@@ -378,10 +378,22 @@ form submits, and not the reason a submission failed. Fixing the stitching would
 mean editing the engine, which is off-limits, so it is flagged here rather than
 patched.
 
+**A closed / removed posting is proven, not retried.** When a listed link now
+renders Ashby's "Job not found" / "This posting has expired" page, that is a
+*terminal fact about the link*, not a scan error. `core/scan-verdict.js` names it
+`posting_gone` (before the generic "no fields" case), and `scripts/scan-link.js`
+captures a **full-page proof screenshot** (`core/page-evidence.js`, headless,
+best-effort — a capture or Storage failure never becomes a scan error), uploads it
+to Supabase Storage, and records it on the link row (`link_status='unavailable'` +
+`link_evidence_json`). The scan worker treats it as DONE (never retried, no draft
+pre-warm), the link leaves the unscanned backlog, and **the assigned CA sees the
+proof in their review pane** with APPLY locked and the page's own words as the
+reason — so nobody has to open the URL to learn why there is nothing to fill.
+
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 161 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 171 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits

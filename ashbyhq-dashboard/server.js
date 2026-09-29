@@ -394,6 +394,15 @@ async function answersPayload(app_) {
   const groups = { deterministic: [], genai: [], placeholder: [], missing_fact: [], ca_edited: [], needs_input: [], not_applicable: [], stale: [] };
   for (const r of questions) (groups[r.source] || (groups[r.source] = [])).push(r);
   const inFlight = linkFields.length ? null : await scanStateForUrl(app_.url);
+  // A CLOSED / REMOVED posting is a terminal fact the scanner recorded on the link
+  // row (with a proof screenshot). It is neither 'scanned' nor a retryable
+  // 'unscanned' - the pane must show WHY there is nothing to fill. Only applies
+  // while the link really has no inventory (a later force-scan that finds a form
+  // clears it, so a link with fields is always 'scanned').
+  let linkEvidence = null;
+  try { linkEvidence = app_.link_evidence_json ? JSON.parse(app_.link_evidence_json) : null; } catch { linkEvidence = null; }
+  const linkUnavailable = !linkFields.length
+    && (app_.link_status === 'unavailable' || Boolean(linkEvidence?.reason || linkEvidence?.screenshot));
   const blocking = questions.filter((r) => !r.value && r.required && r.source !== 'not_applicable' && r.source !== 'stale');
   return {
     applicationId: app_.id,
@@ -401,7 +410,9 @@ async function answersPayload(app_) {
     linkId: app_.link_id,
     scanned: linkFields.length > 0,
     // 'pre_scanning' | 'queued' | 'failed' tell the UI to wait, not to give up.
-    scanState: linkFields.length ? 'scanned' : (inFlight || 'unscanned'),
+    // 'unavailable' tells it the posting itself is gone - stop waiting, show proof.
+    scanState: linkUnavailable ? 'unavailable' : (linkFields.length ? 'scanned' : (inFlight || 'unscanned')),
+    linkEvidence: linkUnavailable ? { ...(linkEvidence || {}), status: app_.link_status } : null,
     fieldCount: linkFields.length,
     questionCount: questions.length,
     // Questions the form asks that NO draft pass ever answered - the pane shows

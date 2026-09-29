@@ -31,7 +31,7 @@ import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import dotenv from 'dotenv';
 import { migrate, db, nowIso } from '../db/index.js';
-import { saveJobLinkFields, listJobLinkFields } from '../db/store.js';
+import { saveJobLinkFields, listJobLinkFields, setLinkUnavailable } from '../db/store.js';
 import { upsertJobLinkQuestions, fetchJobLinkQuestions, jobIdFromUrl, normalizeJobLink } from '../connector/joblink-questions.js';
 import { companyFromUrl } from '../core/job-url.js';
 import { judgeScan, inventoryIsResidue } from '../core/scan-verdict.js';
@@ -184,6 +184,34 @@ child.on('exit', async (code) => {
   const verdict = judgeScan(scan, link);
   if (!verdict.ok) {
     try { fs.unlinkSync(out); } catch { /* temp file only */ }
+
+    // A CLOSED / REMOVED posting is a real, terminal fact about the LINK — not a
+    // paste mistake to retry and not a host fault. Snap the page as proof, record
+    // it on the link row, and exit 0 (the question "is there a form here?" is now
+    // definitively answered: no, and here is the picture). The assigned CA sees the
+    // screenshot in their review pane instead of an unexplained locked APPLY.
+    if (verdict.kind === 'posting_gone') {
+      let shotUrl = null;
+      let shotNote = '';
+      try {
+        const { capturePageEvidence } = await import('../core/page-evidence.js');
+        const shot = await capturePageEvidence(link);
+        if (shot.ok) {
+          const { uploadScreenshot, storageConfigured } = await import('../connector/supabase-storage.js');
+          if (storageConfigured()) {
+            const up = await uploadScreenshot({ filePath: shot.filePath, destPath: `link-unavailable/${jobId || linkId}-${Date.now()}.png` });
+            if (up.ok) shotUrl = up.url; else shotNote = up.error || up.skipped || 'upload_failed';
+          } else shotNote = 'storage_not_configured';
+          try { fs.unlinkSync(shot.filePath); } catch { /* temp file only */ }
+        } else shotNote = shot.error || 'capture_failed';
+      } catch (err) {
+        shotNote = String(err?.message || err).slice(0, 160);
+      }
+      await setLinkUnavailable(linkId, { screenshotUrl: shotUrl, reason: verdict.why });
+      console.log(`POSTING_UNAVAILABLE: ${verdict.why}${shotUrl ? ` [proof: ${shotUrl}]` : ` [no proof: ${shotNote}]`}`);
+      process.exit(0);
+    }
+
     // Clear a previously stored one-field inventory so the review pane cannot
     // keep showing junk after this link has been correctly refused. A real
     // inventory (2+ fields) is never touched here.

@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS job_links (
   title TEXT NOT NULL,
   url TEXT NOT NULL UNIQUE,
   url_hash TEXT NOT NULL,
-  link_status TEXT NOT NULL DEFAULT 'valid', -- valid | expired | already_applied
+  link_status TEXT NOT NULL DEFAULT 'valid', -- valid | expired | already_applied | unavailable
+  link_evidence_json TEXT,                   -- { screenshot, reason, captured_at } for an unavailable posting
   seeded_at TEXT NOT NULL
 );
 

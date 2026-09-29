@@ -265,6 +265,10 @@ export async function migrate() {
   ensureColumnSqlite('applications', 'screenshots_json', 'TEXT');
   ensureColumnSqlite('applications', 'purged_at', 'TEXT');
   ensureColumnSqlite('link_scan_jobs', 'scan_via', 'TEXT');
+  // Proof of a CLOSED / REMOVED posting: { screenshot, reason, captured_at }. The
+  // link is a real terminal state, so the evidence lives on the link row and is
+  // shown to every CA assigned to it (there is no application run to attach it to).
+  ensureColumnSqlite('job_links', 'link_evidence_json', 'TEXT');
   // Hand-back backoff: a QUEUED application a host cannot launch is parked until
   // this timestamp instead of being re-claimed on every poll tick.
   ensureColumnSqlite('applications', 'next_attempt_at', 'TEXT');
@@ -301,6 +305,7 @@ async function ensureScreenshotColumnsPostgres() {
   // "scanned" row means nothing unless the reader can tell which it was.
   await p.query('ALTER TABLE link_scan_jobs ADD COLUMN IF NOT EXISTS scan_via TEXT');
   await p.query('ALTER TABLE applications ADD COLUMN IF NOT EXISTS next_attempt_at TEXT');
+  await p.query('ALTER TABLE job_links ADD COLUMN IF NOT EXISTS link_evidence_json JSONB');
 }
 
 async function migrateCamToOpsPostgres() {

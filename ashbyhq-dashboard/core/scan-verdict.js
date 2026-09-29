@@ -25,9 +25,19 @@
    costs every future application on that link, silently, everywhere.
    ===================================================================== */
 
-// Text that betrays a page which is not an application form. Anchored on the
-// words a listing/404 page actually renders, not on generic prose.
-export const NOT_FORM_RE = /page not found|not found|404|no longer exists|doesn'?t exist|expired|invalid link|open roles|open positions|all roles|current openings|latest jobs|browse (?:all )?(?:jobs|roles)|coming soon/i;
+// A CLOSED / REMOVED posting: the link was real, but the job is gone. This is a
+// terminal fact about the LINK (not a paste mistake, not a host fault), so it
+// gets its own class — the scanner snaps the page as proof and hands it to the
+// assigned CA instead of burning retries on a page that will never be a form.
+export const POSTING_GONE_RE = /job(?:\s+you\s+requested)?(?:\s+was)?\s+not\s+found|page\s+not\s+found|not\s+found|404|no\s+longer\s+exists|doesn'?t\s+exist|does\s+not\s+exist|no\s+longer\s+accepting|(?:posting|job|position)\s+.{0,18}(?:closed|expired|removed|filled|withdrawn)|has\s+been\s+(?:closed|removed|filled)|archived|unavailable/i;
+
+// A LISTING / wrong page: the URL points at a careers list or a job whose id was
+// never an application form. The fix is a different URL, so it is refused with no
+// proof and a DEV-facing "replace the link" note.
+export const JOB_LISTING_RE = /open\s+(?:roles|positions)|all\s+(?:roles|positions)|current\s+openings|latest\s+jobs|browse\s+(?:all\s+)?(?:jobs|roles)|view\s+all\s+open\s+positions|coming\s+soon/i;
+
+// Kept for callers/tests that only want "is this page clearly not a form?".
+export const NOT_FORM_RE = new RegExp(`${POSTING_GONE_RE.source}|${JOB_LISTING_RE.source}`, 'i');
 
 /** An explicit Ashby application-form URL: …/<posting-uuid>/application */
 export function isApplicationFormUrl(link) {
@@ -55,15 +65,22 @@ export function judgeScan(scan, link) {
   const seen = [p.jobTitle, p.h1, p.docTitle, p.headingAttr]
     .map((s) => String(s || '').trim()).filter(Boolean).join(' · ');
 
-  if (!fields.length) return { ok: false, why: 'the page exposed no application-form fields at all' };
-  if (seen && NOT_FORM_RE.test(seen)) {
-    return { ok: false, why: `not an application form — the page read "${seen.slice(0, 120)}"` };
+  // A closed posting is checked FIRST, before the empty-fields short-circuit:
+  // Ashby's "Job not found" page legitimately exposes zero form fields, and the
+  // page's own words are what make it a *gone* link rather than a generic scan
+  // that found nothing. The two have different owners and different follow-ups.
+  if (seen && POSTING_GONE_RE.test(seen)) {
+    return { ok: false, kind: 'posting_gone', why: `the job posting is closed or unavailable — the page read "${seen.slice(0, 120)}"` };
+  }
+  if (!fields.length) return { ok: false, kind: 'no_fields', why: 'the page exposed no application-form fields at all' };
+  if (seen && JOB_LISTING_RE.test(seen)) {
+    return { ok: false, kind: 'listing', why: `not an application form — the page read "${seen.slice(0, 120)}"` };
   }
   // A real form always asks for more than one thing. One control on a URL that is
   // not an explicit /application page means the click-through never happened.
   if (inventoryIsResidue(fields, link)) {
     const q = String(fields[0]?.question || fields[0]?.field_key || 'unnamed control');
-    return { ok: false, why: `only 1 field ("${q.slice(0, 80)}") on a URL that is not an /application form — this looks like a job listing, not an application` };
+    return { ok: false, kind: 'residue', why: `only 1 field ("${q.slice(0, 80)}") on a URL that is not an /application form — this looks like a job listing, not an application` };
   }
-  return { ok: true };
+  return { ok: true, kind: 'form' };
 }

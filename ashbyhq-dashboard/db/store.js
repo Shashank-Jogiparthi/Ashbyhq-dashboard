@@ -347,7 +347,7 @@ export async function getApplicantByAwlId(awlId) {
 /* ------------------------------------------------------------------ */
 
 const APP_SELECT = `
-  SELECT a.*, jl.company, jl.title, jl.url, jl.link_status,
+  SELECT a.*, jl.company, jl.title, jl.url, jl.link_status, jl.link_evidence_json,
          ap.full_name, ap.email AS applicant_email, ap.resume_address,
          s.name AS ca_name, am.name AS am_name, m.name AS manager_name
   FROM applications a
@@ -775,7 +775,25 @@ export async function listUnscannedLinks() {
   return db.prepare(`SELECT l.id, l.url, l.company, l.title
     FROM job_links l
     WHERE NOT EXISTS (SELECT 1 FROM job_link_fields f WHERE f.link_id = l.id)
+      AND l.link_status <> 'unavailable'
     ORDER BY l.id`).all();
+}
+
+// A link whose posting is CLOSED / REMOVED is a real terminal state of the LINK,
+// not a scan error and not the applicant's problem. Record the proof (the
+// screenshot URL + the page's own words) on the row and flip link_status, so
+// every CA assigned to an application on it sees WHY there is nothing to fill,
+// with the image as evidence. The screenshot URL may be null when Storage is not
+// configured on this host — the reason text still carries the proof.
+export async function setLinkUnavailable(linkId, { screenshotUrl = null, reason = '' } = {}) {
+  const evidence = {
+    screenshot: screenshotUrl || null,
+    reason: String(reason || '').slice(0, 300),
+    captured_at: nowIso()
+  };
+  await db.prepare("UPDATE job_links SET link_status = 'unavailable', link_evidence_json = ? WHERE id = ?")
+    .run(JSON.stringify(evidence), Number(linkId));
+  return evidence;
 }
 
 export async function getJobLinkById(linkId) {
