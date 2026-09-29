@@ -297,12 +297,33 @@ cannot equip is pinned off by the gate with the reason in the DEV pane, which is
 better than a deploy that does not start. Skip it with
 `APPLYWIZZ_SKIP_BROWSER_INSTALL=true` when the image already has a browser.
 
+**The org chart is real now, and read-only from the CRM.** A CA signing in sees
+their own AWL-IDs **and** which OM(CAM) they report to; an OM sees only the CAs
+under them and those CAs' clients. Identity (name/email/role) comes from the
+committed roster in `connector/staff-roster.js` (59 CAs + balaji/RK as OPS +
+two admins) because the four permitted CRM tables carry only CA/OM *UUIDs*,
+never a name. The CA→OM edge and each applicant's `ca_id`/`ops_id` are derived
+live from `clients_additional_info`'s `career_associate_id` /
+`career_associate_manager_id`, matched onto staff by `ext_id` — a reporting line
+is never invented. `seedStaffDirectory()` is idempotent (keyed on `ext_id`,
+emails stored lower-case) and fires on boot + full sync. When the CRM
+re-attaches an applicant to a different CA than a placeholder first guessed
+(AWL-25663 → Manusha Nune under balaji), her **live** applications re-point to
+the real CA but any SUCCESS row stays as history. Five `@applywizz.local`
+fixtures are retired (`active=0`, never deleted); the dev/testing rows you kept
+(shashank.dev, shashankjogiparthi, the priya.cam → rakesh pair) stay. The DEV
+pane reads it at *Staff tree* (`/api/dev/staff/tree`) with a live
+`staffDirectoryStats()`. If the CRM names a CA outside the roster it is shown
+as `tree_unresolved` — that applicant gets its OM but no CA until you add the
+person to the roster.
+
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 134 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 147 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
-                      # resume-source attribution, one CRM name list
+                      # resume-source attribution, one CRM name list, idempotent
+                      # staff-directory seed + CA/OM sign-in scoping
 ```
 
 ---

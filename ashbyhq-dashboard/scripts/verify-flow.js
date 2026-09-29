@@ -737,6 +737,71 @@ async function verifyCsvParser() {
   check('an empty row is dropped silently', bad.pairs.length === 0 && !bad.skipped.some((s) => s.line === 4));
 }
 
+async function verifyStaffDirectory() {
+  step('7. Org-chart directory (59 CAs + 2 OPS + 2 ADMIN; tree edges read from the CRM, never invented)');
+  const dir = await import('../connector/staff-directory.js');
+  const { CA_ROSTER, MANAGER_ROSTER, ADMIN_ROSTER } = await import('../connector/staff-roster.js');
+
+  check('the committed roster is the sole identity source: 59 CA + 2 OPS + 2 ADMIN',
+    CA_ROSTER.length === 59 && MANAGER_ROSTER.length === 2 && ADMIN_ROSTER.length === 2,
+    `${CA_ROSTER.length}/${MANAGER_ROSTER.length}/${ADMIN_ROSTER.length}`);
+
+  // Seed twice: the directory is keyed on ext_id (email fallback) and must be
+  // idempotent - re-running on every boot/sync can never duplicate a person.
+  await dir.seedStaffDirectory();
+  const a = await dir.staffDirectoryStats();
+  await dir.seedStaffDirectory();
+  const b = await dir.staffDirectoryStats();
+  check('seeding is idempotent - a second run adds nobody',
+    b.realStaff === a.realStaff && b.ca === a.ca && b.ops === a.ops && b.admin === a.admin,
+    `ca ${a.ca}->${b.ca}, total ${a.total}->${b.total}`);
+  check('the directory holds 59 active CAs, 2 OPS, 2 ADMIN',
+    b.ca === 59 && b.ops === 2 && b.admin === 2, `${b.ca}/${b.ops}/${b.admin}`);
+
+  // Mixed-case CRM emails (RathnamalaM@Applywizz.com) are stored lower-case so
+  // email-keyed sign-in lookup stays stable.
+  const mixed = await db.prepare('SELECT email FROM staff WHERE email <> lower(email) AND ext_id IS NOT NULL').all();
+  check('staff emails are normalised to lower-case (CRM mixed case never stored)',
+    mixed.length === 0, JSON.stringify(mixed.map((r) => r.email)));
+
+  const manusha = CA_ROSTER.find((c) => c.name === 'Manusha Nune');
+  const balaji = MANAGER_ROSTER.find((m) => m.email === 'balaji@applywizz.ai');
+  const t = await dir.resolveTree({ career_associate_id: manusha.extId, career_associate_manager_id: balaji.extId });
+  check('resolveTree maps an applicant onto its real CA + OM by ext_id',
+    Boolean(t.caId) && Boolean(t.opsId) && !t.caUnresolved && !t.omUnresolved,
+    JSON.stringify({ caId: t.caId, opsId: t.opsId }));
+  const t2 = await dir.resolveTree({ careerassociateid: manusha.extId, careerassociatemanagerid: balaji.extId });
+  check('the squashed CRM column spelling resolves identically', t2.caId === t.caId && t2.opsId === t.opsId);
+
+  // A CA the roster never named must be surfaced as unresolved, NOT fabricated:
+  // the roster is authoritative, so we invent neither a person nor a reporting line.
+  const GHOST = '00000000-0000-4000-8000-000000000000';
+  const g = await dir.resolveTree({ career_associate_id: GHOST, career_associate_manager_id: balaji.extId });
+  check('an unrostered CA is named unresolved (its OM still resolves), never fabricated',
+    g.caUnresolved === true && g.caId === null && Boolean(g.opsId),
+    JSON.stringify({ caId: g.caId, caUnresolved: g.caUnresolved }));
+  check('resolving an unrostered CA creates no staff row',
+    !(await db.prepare('SELECT uuid FROM staff WHERE ext_id = ?').get(GHOST)));
+
+  const lk = await dir.linkCaManagers([
+    { career_associate_id: manusha.extId, career_associate_manager_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff' }
+  ]);
+  check('a CA->OM edge is drawn only when both staff exist (no invented manager)',
+    lk.unresolvedOm >= 1 && lk.linked === 0, JSON.stringify(lk));
+
+  // The two sign-in scopes the operator asked for live in these joins, and the
+  // re-point keeps SUCCESS rows as history rather than rewriting them.
+  const storeSrc = fs.readFileSync(STORE_SCRIPT, 'utf8');
+  check('a CA sign-in sees exactly their own AWL-IDs (WHERE ap.ca_id = ?)',
+    /getApplicantsForCa[\s\S]{0,400}WHERE ap\.ca_id = \?/.test(storeSrc));
+  check('an OM sign-in sees only the clients of CAs under them (WHERE s.manager_id = ?)',
+    /getApplicantsForManager[\s\S]{0,400}WHERE s\.manager_id = \?/.test(storeSrc));
+  check('client details carry the handling CA + OM (ca_name / manager_name)',
+    /s\.name AS ca_name[\s\S]{0,120}m\.name AS manager_name/.test(storeSrc));
+  check('a re-assigned applicant re-points live work but keeps SUCCESS history',
+    /UPDATE applications SET ca_id[\s\S]{0,200}status <> 'SUCCESS'/.test(storeSrc));
+}
+
 async function verifyCrmFetch() {
   step('6. CRM fetch (--crm only; needs the Azure connection)');
   const { isConfigured, syncApplicantByAwl } = await import('../connector/applicant-db.js');
@@ -758,6 +823,7 @@ try {
   await verifyLocationShapes();
   await verifyDevLog(appA);
   await verifyCsvParser();
+  await verifyStaffDirectory();
   if (process.argv.includes('--crm')) await verifyCrmFetch();
 } catch (err) {
   failed += 1;

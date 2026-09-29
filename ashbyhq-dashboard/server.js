@@ -54,7 +54,8 @@ import { describeConnectorEnv } from './core/applicant-source.js';
 import * as worker from './worker/runner.js';
 import { enqueueLinkScans, scanQueueState, scanStateForUrl, start as startScanWorker } from './worker/link-scanner.js';
 import { checkBrowser } from './core/browser-check.js';
-import { syncFromPostgres, syncApplicantByAwl, ingestDocument, normalizeAwlId, isConfigured as connectorConfigured } from './connector/applicant-db.js';
+import { syncFromPostgres, syncApplicantByAwl, ingestDocument, normalizeAwlId, isConfigured as connectorConfigured, buildStaffTree } from './connector/applicant-db.js';
+import { staffDirectoryStats } from './connector/staff-directory.js';
 import { runDraftPass, buildReviewQuestions } from './draft-service.js';
 import {
   listFieldAnswers,
@@ -122,6 +123,14 @@ checkBrowser({ mode: 'apply' })
   .catch(() => {});                          // answers on its own; see the note above
 worker.start().catch((e) => console.error('worker start:', e.message)); // poll loop always runs; it only CLAIMS when worker_enabled=true
 startScanWorker();                          // pre-scan queue: claims link_scan_jobs rows
+// Staff directory: seed the committed org-chart roster (59 CAs + 2 OPS + 2
+// ADMIN) as real staff and derive every CA -> OM edge from the CRM, so the
+// AWL-ID -> CA -> OM(CAM) tree exists BEFORE the first applicant sync resolves
+// against it. Idempotent, and a failure here must never stop the HTTP server,
+// so it is fired and logged, not awaited.
+buildStaffTree()
+  .then((r) => console.log(`staff directory: seeded ${r.seed.created} new / ${r.seed.updated} existing, retired ${r.seed.retired}; CA->OM links: ${r.link.linked ?? 0}${r.link.skipped ? ` (${r.link.skipped})` : ''}`))
+  .catch((e) => console.error('staff directory seed:', e.message));
 // Privacy sweep: the draft pass caches parsed resume text on disk. A successful
 // apply erases it immediately; this clears anything left over from a run that
 // never finished (crash, machine off) once its TTL has passed.
@@ -600,6 +609,18 @@ app.post('/api/dev/sync-one', requireAuth, requireRole('dev', 'admin'), wrap(asy
   const sync = await syncApplicantByAwl(awlId, { opsId: req.body.opsId || null });
   return { awlId, sync, scan: await queueUnscannedLinks('sync-one') };
 }));
+
+// Rebuild the AWL-ID -> CA -> OM(CAM) org chart on demand: seed the committed
+// roster as staff, then derive CA -> OM edges from clients_additional_info.
+// Idempotent - safe to hit after any deploy or roster change. Returns the live
+// directory health so the DEV pane can show real CAs/OPS/ADMIN counts.
+app.post('/api/dev/staff/tree', requireAuth, requireRole('dev', 'admin'), wrap(async () => {
+  const result = await buildStaffTree();
+  return { ...result, stats: await staffDirectoryStats(), connector: connectorConfigured() };
+}));
+app.get('/api/dev/staff/tree', requireAuth, requireRole('dev', 'admin'), wrap(async () => ({
+  stats: await staffDirectoryStats(), connector: connectorConfigured()
+})));
 
 // Any route that can introduce links funnels through here: links with no field
 // inventory yet get a background pre-scan, so a CA never lands on an empty pane.

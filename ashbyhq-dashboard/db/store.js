@@ -1149,25 +1149,54 @@ export async function upsertApplicantJoblink(awlId, { url, company = '', title =
 }
 
 // Insert/refresh an applicant streamed from the external Postgres DB.
-// Existing CA attachment is preserved; profile + resume address are refreshed.
-export async function upsertExternalApplicant({ awlId, fullName, email, phone, resumeAddress, profileJson, extId, opsId }) {
+// `caId`/`opsId` are the staff uuids the CRM tree resolved to (career_associate_id
+// -> CA, career_associate_manager_id -> OM). The CRM org chart is authoritative
+// and static, so a resolved CA is written straight onto the applicant; when that
+// is the moment a CA first attaches, the applicant's already-queued job links
+// materialise into applications immediately (this is what lets a pasted
+// "AWL-ID + joblink" flow start working with no manual assign step). An
+// unresolved tree leaves the existing attachment untouched rather than clearing
+// it, so a partial CRM read can never orphan live work.
+export async function upsertExternalApplicant({ awlId, fullName, email, phone, resumeAddress, profileJson, extId, opsId, caId }) {
   if (!awlId) throw new HttpError(400, 'Applicant is missing an AWL-ID');
   const existing = await db.prepare('SELECT * FROM applicants WHERE awl_id = ?').get(awlId);
   if (existing) {
+    const newCa = caId ?? existing.ca_id;
+    const justAssigned = existing.ca_id == null && newCa != null;
     await db.prepare(`UPDATE applicants SET full_name = ?, email = ?, phone = ?, resume_address = ?,
-                profile_json = ?, ext_id = ?, ops_id = COALESCE(?, ops_id), source_updated_at = ?
+                profile_json = ?, ext_id = ?, ops_id = COALESCE(?, ops_id), ca_id = ?,
+                assigned_at = ?, source_updated_at = ?
                 WHERE awl_id = ?`)
       .run(fullName || existing.full_name, email || existing.email, phone ?? existing.phone,
         resumeAddress ?? existing.resume_address, profileJson ?? existing.profile_json,
-        extId ?? existing.ext_id, opsId, nowIso(), awlId);
-    return { created: false, applicant: await db.prepare('SELECT * FROM applicants WHERE awl_id = ?').get(awlId) };
+        extId ?? existing.ext_id, opsId, newCa,
+        justAssigned ? nowIso() : existing.assigned_at, nowIso(), awlId);
+    const applicant = await db.prepare('SELECT * FROM applicants WHERE awl_id = ?').get(awlId);
+    if (newCa) {
+      const ca = await getStaff(newCa);
+      const mgr = ca?.manager_id || opsId || null;
+      // The CRM is authoritative: if the applicant moved to a different CA (a
+      // fixture re-pointed to the real person, or a genuine reassignment), the
+      // open work must follow it - otherwise the CA signs in and sees nothing
+      // while a retired fixture still "owns" the applications. SUCCESS rows are
+      // history and are left untouched.
+      if (newCa !== existing.ca_id) {
+        await db.prepare(`UPDATE applications SET ca_id = ?, manager_id = ?, updated_at = ?
+          WHERE awl_id = ? AND status <> 'SUCCESS'`).run(newCa, mgr, nowIso(), awlId);
+      }
+      // Idempotent: only touches materialized = 0 links, so a re-point of an
+      // already-materialised applicant creates no duplicate application.
+      await materializeJoblinks(awlId, newCa, mgr);
+    }
+    return { created: false, assigned: justAssigned, applicant };
   }
+  const newCa = caId ?? null;
   await db.prepare(`INSERT INTO applicants (awl_id, full_name, email, phone, ca_id, ops_id, ext_id,
-                resume_address, profile_json, source_updated_at)
-              VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`)
-    .run(awlId, fullName || awlId, email || '', phone || '', opsId ?? null, extId ?? null,
-      resumeAddress || '', profileJson || '{}', nowIso());
-  return { created: true, applicant: await db.prepare('SELECT * FROM applicants WHERE awl_id = ?').get(awlId) };
+                resume_address, profile_json, assigned_at, source_updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(awlId, fullName || awlId, email || '', phone || '', newCa, opsId ?? null, extId ?? null,
+      resumeAddress || '', profileJson || '{}', newCa ? nowIso() : null, nowIso());
+  return { created: true, assigned: Boolean(newCa), applicant: await db.prepare('SELECT * FROM applicants WHERE awl_id = ?').get(awlId) };
 }
 
 /* ------------------------------------------------------------------ */

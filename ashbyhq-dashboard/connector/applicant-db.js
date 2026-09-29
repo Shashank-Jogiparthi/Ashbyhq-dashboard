@@ -37,6 +37,7 @@ import {
 import { getPg, pgConfig, CRM_HOST_NAMES, CRM_URL_NAMES } from './azure-config.js';
 import { listAwlJobLinks, ensureAwlLinksTable } from './awl-links.js';
 import { upsertJobLinkQuestions, ensureQuestionsTable } from './joblink-questions.js';
+import { resolveTree, linkCaManagers, seedStaffDirectory } from './staff-directory.js';
 
 const PROFILE_TABLE = () => process.env.PG_APPLICANTS_TABLE || 'public.client_profiles';
 const INFO_TABLE = () => process.env.PG_APPLICANT_INFO_TABLE || 'public.clients_additional_info';
@@ -184,18 +185,53 @@ async function resolveOpsFromExternal(info) {
 async function upsertCombined(prof, info, { opsId, summary }) {
   const mapped = mapCombined(prof || {}, info || {});
   if (!mapped.awlId) { if (summary) summary.skipped += 1; return null; }
-  const targetOps = opsId || await resolveOpsFromExternal(info || {});
+  // The AWL-ID -> CA -> OM(CAM) tree is read from clients_additional_info
+  // (career_associate_id / career_associate_manager_id) and matched onto staff
+  // rows by ext_id. The org chart is authoritative: a resolved CA is written
+  // straight onto the applicant, which is what makes the pasted links
+  // materialise under the right CA with no manual assign step.
+  const tree = await resolveTree(info || {});
+  const targetOps = tree.opsId || opsId || await resolveOpsFromExternal(info || {});
   const res = await upsertExternalApplicant({
     awlId: mapped.awlId, fullName: mapped.fullName, email: mapped.email,
     phone: mapped.phone, resumeAddress: mapped.resumeAddress,
-    profileJson: JSON.stringify(mapped.profile), extId: mapped.extId, opsId: targetOps
+    profileJson: JSON.stringify(mapped.profile), extId: mapped.extId,
+    opsId: targetOps, caId: tree.caId
   });
-  if (summary) { if (res.created) summary.created += 1; else summary.updated += 1; }
+  if (summary) {
+    if (res.created) summary.created += 1; else summary.updated += 1;
+    if (res.assigned) summary.assigned = (summary.assigned || 0) + 1;
+    if (tree.caUnresolved || tree.omUnresolved) summary.tree_unresolved = (summary.tree_unresolved || 0) + 1;
+  }
   for (const link of mapped.links) {
     await upsertApplicantJoblink(mapped.awlId, { url: link.url, company: link.company || '', title: link.title || '' });
     if (summary) summary.links += 1;
   }
   return res;
+}
+
+// Explicit, idempotent tree build: seed the staff directory from the committed
+// roster, then derive every CA -> OM edge the CRM states (distinct
+// career_associate_id -> career_associate_manager_id pairs). Called on boot and
+// from DEV > Staff directory; makes the manager sign-in view correct even for
+// CAs whose applicants have not synced yet.
+export async function buildStaffTree() {
+  const seed = await seedStaffDirectory();
+  const cfg = pgConfig();
+  if (!cfg) return { seed, link: { skipped: 'no_postgres' } };
+  const pg = await getPg();
+  const pool = new pg.Pool(cfg);
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT career_associate_id, career_associate_manager_id FROM ${INFO_TABLE()}
+        WHERE career_associate_id IS NOT NULL AND career_associate_manager_id IS NOT NULL`
+    );
+    const link = await linkCaManagers(rows);
+    await logEvent(null, 'staff_tree_built', 'connector', { ...seed, ...link });
+    return { seed, link };
+  } finally {
+    await pool.end().catch(() => {});
+  }
 }
 
 // Pull the two tables (optionally filtered to a single AWL-ID), join in JS on
@@ -213,6 +249,11 @@ export async function syncFromPostgres({ opsId = null, awlId = null } = {}) {
   const pool = new pg.Pool(cfg);
   try {
     const awlParam = awlId ? normalizeAwlId(awlId) : '';
+    // A full sync is the one place we re-seed the directory: idempotent, and it
+    // guarantees the staff rows exist before any resolveTree() call, even on a
+    // host that booted before the roster was committed. Per-AWL syncs trust the
+    // boot seed and skip it.
+    if (!awlParam) await seedStaffDirectory();
     const where = awlParam ? ' WHERE applywizz_id = $1' : '';
     const params = awlParam ? [awlParam] : [];
     const [{ rows: profiles }, { rows: infos }] = await Promise.all([

@@ -1062,6 +1062,76 @@ VERIFICATION (npm run verify:flow, now 134 assertions)
   live CA traffic raced the checks, so every feed assertion is
   scoped to its own application_id.
 
+====================================================================
+12. v3.5 - THE REAL ORG CHART (identity from a roster, edges from the CRM)
+====================================================================
+The sign-in scoping (a CA sees their own AWL-IDs + the OM they report
+under; an OM sees only the CAs under them) rests on ONE rule: the
+AWL-ID -> CA -> OM(CAM) tree is READ, never invented.
+
+  * IDENTITY (uuid -> name/email/role) lives in
+    connector/staff-roster.js - the operator's committed 59 active Career
+    Associates, the two Operational Managers (balaji, RK) and two admins.
+    It is the only source of a staff NAME, because the four permitted CRM
+    tables (client_profiles, clients_additional_info, ashby_joblinks,
+    ashby_joblink_questions) carry only the CA/OM *UUIDs* per applicant row
+    - never a name, no admin. The old public.dice_ca_accounts lookup is
+    discontinued; nothing reads it.
+
+  * THE EDGE (CA reports to which OM; which CA owns an applicant) is
+    derived live from clients_additional_info's career_associate_id /
+    career_associate_manager_id, matched onto staff rows by ext_id.
+    staff-directory.js resolveTree()/linkCaManagers() draw a line ONLY when
+    both uuids resolve to a real staff row; they never fabricate a person
+    or a reporting line.
+
+  * seedStaffDirectory() is idempotent, keyed on ext_id (email fallback),
+    so it runs on every boot + full sync without duplicating a soul. Emails
+    are stored lower-case (the CRM mixes case: RathnamalaM@Applywizz.com
+    becomes the sign-in key rathnamalam@applywizz.com). ADMIN_ROSTER drops
+    sharansrikar per the operator. The legacy @applywizz.local fixtures are
+    retired (active=0, never deleted so history FKs hold) EXCEPT the rows
+    the operator kept for dev/testing: shashank.dev + shashankjogiparthi and
+    the priya.cam -> rakesh CA-under-CAM pair.
+
+  * When the CRM re-attaches an applicant to a different CA than the
+    fixture first guessed (exactly AWL-25663: her work was parked under a
+    @applywizz.local placeholder before the real directory existed),
+    upsertExternalApplicant re-points that applicant's LIVE applications
+    (ca_id + manager_id) to the real CA but leaves any SUCCESS row alone -
+    a completed application is history, not current work. A CA signing in
+    therefore sees the work the CRM actually gave them, not a retired
+    fixture.
+
+  * No new table, no new column: staff (ext_id, manager_id) and applicants
+    (ca_id, ops_id, assigned_at) already carried every field the tree
+    needs. server.js fires buildStaffTree() at boot (not awaited, so the
+    HTTP port never waits on it) and exposes it to the DEV pane at
+    GET/POST /api/dev/staff/tree, which also returns staffDirectoryStats().
+
+LIVE PROOF (real Supabase + Azure CRM): seeding produced 59 CA + 2 OPS +
+2 ADMIN real staff and retired 5 fixtures; of the 62 distinct (ca,om) pairs
+the CRM names, 59 CAs linked onto their managers. AWL-25663 resolved to
+Manusha Nune (manushanune@applywizz.com) under balaji (balaji@applywizz.ai),
+and her FAILED run #101 re-pointed off the old placeholder onto Manusha's
+staff uuid. Manusha's sign-in scope owns 1 applicant; balaji has 28 active
+CAs under him.
+
+HONEST LEFTOVER: 3 CRM career_associate_id values (e33284fc.., b91c88d5..,
+f363144f.. - carrying 6 / 2 / 1 applicants, all under the two real OMs) are
+NOT in the operator's 59-person list. The rule surfaces them as
+tree_unresolved / stats instead of inventing staff rows: those applicants get
+their real OM but no CA until the operator adds them to the roster. A
+departed CA is not resurrected as active staff by a stray applicant row.
+
+verify:flow (step 7) asserts this as a RULE, not a setting: the roster counts
+59/2/2; seeding twice adds nobody; ext_id-backed emails are lower-case;
+resolveTree maps an applicant to a real CA + OM (and reads the squashed
+column spelling identically); an unrostered CA is named unresolved and
+creates no staff row; linkCaManagers draws an edge only when both ends
+exist; and the two sign-in joins filter on ap.ca_id / s.manager_id while the
+re-point keeps SUCCESS history. 147 checks pass.
+
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
      operator override, but it can only pin a host OFF, never claim
@@ -1096,5 +1166,5 @@ RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      'has no resume'. DATABASE_URL/POSTGRES_URL do not count - they are the
      platform's own database, and the CRM tables are not in them.
 
-END OF CURRENT-STATE DOC (v3.4a) - previous v2 plan superseded; base
+END OF CURRENT-STATE DOC (v3.5) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.
