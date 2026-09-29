@@ -987,6 +987,52 @@ async function verifyStaffDirectory() {
   }
 }
 
+async function verifySignupRoles() {
+  step('8. Sign-up role gate (a NEW email must choose CA / OM / DEV; ADMIN and the 59 CA + admin emails never self-mint)');
+  const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'index.html');
+  const html = fs.readFileSync(INDEX_HTML, 'utf8');
+  const sel = /<select id="role"[^>]*>([\s\S]*?)<\/select>/.exec(html);
+  const opts = sel ? [...sel[1].matchAll(/value="(\w+)"/g)].map((m) => m[1]) : [];
+  check('the sign-up form offers exactly CA / OM / DEV - ADMIN is not a choice',
+    sel && /\brequired\b/.test(sel[0]) && opts.join(',') === 'ca,ops,dev', opts.join(','));
+  const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
+  check('the request-code route runs every new-account role through assertSignupRole',
+    /const role = await assertSignupRole\(/.test(serverSrc)
+      && !/if \(role === 'admin' && \(await listStaff\('admin'\)\)\.length\)/.test(serverSrc));
+  check('ADMIN changes live only behind the admin-promotion endpoint, never sign-up',
+    /\/api\/admin\/staff\/:uuid\/role/.test(serverSrc) && !/createStaff\(\{[^}]*role: 'admin'/.test(serverSrc));
+
+  // Runtime proof on the exported gate itself. PORT is overridden BEFORE the
+  // import so this never collides with a dev server already on 3000.
+  process.env.PORT = '53199';
+  const { assertSignupRole } = await import('../server.js');
+  const gate = async (email, role, adminLookup = false) => {
+    try { return { ok: await assertSignupRole({ email, role, adminLookup }) }; }
+    catch (e) { return { status: e.status, msg: e.message }; }
+  };
+  const g1 = await gate('newhire@gmail.com', 'ca');
+  const g2 = await gate('newhire@gmail.com', 'OPS');
+  const g3 = await gate('newhire@gmail.com', 'dev');
+  check('a brand-new email may sign up as CA, OM(ops) or DEV - matched case-insensitively',
+    g1.ok === 'ca' && g2.ok === 'ops' && g3.ok === 'dev', JSON.stringify([g1, g2, g3]));
+  check('the OM label maps to the stored ops role (no separate "om" role exists)',
+    /value="ops">OM/.test(html));
+  const g4 = await gate('newhire@gmail.com', '');
+  const g5 = await gate('newhire@gmail.com', 'manager');
+  check('a missing or invented role is refused - choosing CA/OM/DEV is mandatory, never defaulted',
+    g4.status === 400 && g5.status === 400 && /CA, OM or DEV/.test(g4.msg), JSON.stringify([g4, g5]));
+  const g6 = await gate('stranger@gmail.com', 'admin');
+  check('ADMIN cannot be self-created by any email (the bootstrap sign-up is gone)',
+    g6.status === 403 && /ADMIN is not a sign-up choice|already has an ADMIN/.test(g6.msg), g6.msg);
+  const g7 = await gate('balaji@applywizz.ai', 'admin', true);
+  check('an existing ADMIN email is pointed at Sign in, not a second ADMIN account',
+    g7.status === 403 && /Switch to "Sign in"/.test(g7.msg), g7.msg);
+  const g8 = await gate(' RathnamalaM@Applywizz.com ', 'ca');
+  const g9 = await gate('someone@applywizz.ai', 'dev');
+  check('the grandfathered org emails (59 CAs, admins) can never self-mint a role',
+    g8.status === 403 && g9.status === 403 && /Switch to "Sign in"/.test(g8.msg), JSON.stringify([g8, g9]));
+}
+
 async function verifyCrmFetch() {
   step('6. CRM fetch (--crm only; needs the Azure connection)');
   const { isConfigured, syncApplicantByAwl } = await import('../connector/applicant-db.js');
@@ -1010,6 +1056,7 @@ try {
   await verifyDevLog(appA);
   await verifyCsvParser();
   await verifyStaffDirectory();
+  await verifySignupRoles();
   if (process.argv.includes('--crm')) await verifyCrmFetch();
 } catch (err) {
   failed += 1;

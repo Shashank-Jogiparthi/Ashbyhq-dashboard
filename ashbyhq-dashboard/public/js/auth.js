@@ -28,7 +28,7 @@ let mode = 'signin';
 
 const MODE_HINT = {
   signin: 'Already a member — email only.',
-  signup: 'New staff account — pick how you work. Your display name is taken from the email address.'
+  signup: 'New staff account — choosing CA / OM / DEV below is mandatory. Your display name is taken from the email address.'
 };
 
 function setMode(next) {
@@ -60,7 +60,7 @@ setMode('signin');
   }
 })();
 
-// Load OPS-manager list for the sign-up dropdown (role = CA only).
+// Load OM-manager list for the sign-up dropdown (role = CA only).
 (async () => {
   try {
     const { ops } = await api('/api/public/ops');

@@ -29,17 +29,16 @@
           </div>
           <div id="signup-fields" class="hidden">
             <div class="field">
-              <label for="role">I work as</label>
-              <select id="role">
+              <label for="role">I work as <span style="color:#c62828;">*</span></label>
+              <select id="role" required>
                 <option value="ca">CA — Career Associate</option>
-                <option value="ops">OPS — Operational Manager</option>
+                <option value="ops">OM — Operational Manager</option>
                 <option value="dev">DEV — Developer</option>
-                <option value="admin">ADMIN — Organization Admin</option>
               </select>
-              <p class="muted" style="margin:6px 0 0;font-size:12px;">Your display name is taken from this email address. ADMIN: only the first ADMIN can be created here; further admins are promoted by an existing ADMIN from the Staff tab.</p>
+              <p class="muted" style="margin:6px 0 0;font-size:12px;">Choosing CA / OM / DEV is mandatory to create an account. Your display name is taken from this email address. ADMIN cannot be signed up for: existing admins sign in with their emails, and an existing ADMIN promotes others from the Staff tab.</p>
             </div>
             <div class="field hidden" id="ops-field">
-              <label for="ops">Your OPS manager (who you work under)</label>
+              <label for="ops">Your OM manager (who you work under)</label>
               <select id="ops"></select>
             </div>
           </div>

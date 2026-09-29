@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 184 checks pass.
+CA under them. 193 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1214,7 +1214,7 @@ and let OMs size their own CAs instead, starting at 25.
 verify:flow (step 7) asserts the four rule halves: an assignment is capped by
 the CA's own limit and NOT the manager's; a CA with no explicit limit defaults
 to 25; /api/ops/ca/:uuid/quota enforces the manager_id guard; and the OM
-Overview exposes the editable per-CA limit. 184 checks pass (see §14).
+Overview exposes the editable per-CA limit. 193 checks pass (see §14).
 
 ====================================================================
 14. v3.6a - THE RECORD FILLS WHAT IT HAS, WITHOUT WAITING ON GENAI
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 184 checks pass.
+"…Number" / location box abstains. 193 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,7 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 184 checks pass.
+watchdog kills + frees the slot. 193 checks pass.
 
 ====================================================================
 16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
@@ -1372,7 +1372,41 @@ One consequence the operator accepted: the whitelist also removes the old
 @applywizz.local DEV/admin-style logins. The two real ADMINs (@applywizz.ai)
 always remain, and DEV sign-up stays open, so access is never globally lost -
 but a re-created login should use an @applywizz.com/.ai address to survive the
-next cleanup. 184 checks pass.
+next cleanup. 193 checks pass.
 
-END OF CURRENT-STATE DOC (v3.6d) - previous v2 plan superseded; base
+====================================================================
+18. v3.6e - SIGN-UP MINTS ONLY CA / OM / DEV, NEVER ADMIN
+====================================================================
+The 59 CAs, their @applywizz.com mails and the 3 admins with their mails are
+GRANDFATHERED: they already exist in the directory and sign in by email, so
+sign-up is only ever for a brand-new person. That person must NOW choose a
+role - CA, OM (stored as ops) or DEV - mandatorily, with no silent default and
+no ADMIN option. The old first-admin bootstrap was dead code the moment the
+roster seeded admins, and it stayed an open door: any new mailbox could mint
+ANOTHER org admin. One step further than the operator's words, so the rule
+shuts that door for good.
+
+RULE (not a setting), asserted in verify:flow step 8:
+  * server.js SIGNUP_ROLES = ['ca','ops','dev']; every new-account request
+    goes through the exported assertSignupRole() gate before createStaff:
+    - role ADMIN (from ANY email) -> 403; an email that already owns an ADMIN
+      account is told to Switch to "Sign in" instead;
+    - missing / invented role -> 400 "Sign-up requires choosing a role" -
+      there is no default; an empty or 'manager' value can never sneak through
+      even if the browser sends one;
+    - an @applywizz.com / @applywizz.ai email (the grandfathered 59 CA + admin
+      addresses) can never SELF-mint any role -> 403 pointing at Sign in;
+    - everything else resolves to exactly ca | ops | dev, case-insensitively.
+  * CA keeps its existing mandatory OM-manager pick; sign-in is untouched -
+    findStaffByEmail still answers for every rostered email.
+  * UI: the sign-up <select id="role"> is required and offers EXACTLY three
+    options (ADMIN removed); OPS is relabelled "OM - Operational Manager" in
+    the form and in the route's messages, matching how the org speaks.
+  * ADMIN membership changes only via /api/admin/staff/:uuid/role, gated by
+    requireRole('admin') - verify asserts no createStaff(...role:'admin') path
+    exists outside sign-up.
+
+193 checks pass.
+
+END OF CURRENT-STATE DOC (v3.6e) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

@@ -93,6 +93,32 @@ const PORT = Number(process.env.PORT || 3100);
 // RAILWAY_ENVIRONMENT on every service; BIND_HOST overrides either way.
 const BIND_HOST = process.env.BIND_HOST || (process.env.RAILWAY_ENVIRONMENT ? '0.0.0.0' : '127.0.0.1');
 const VALID_ROLES = ['ca', 'ops', 'dev', 'admin'];
+// Self-serve sign-up may ONLY ever mint CA / OM(ops) / DEV. ADMIN is not a
+// sign-up choice (the 3 existing admins signed in with their emails and are
+// grandfathered; more admins come only via /api/admin/staff/:uuid/role), and
+// the role must be CHOSEN — there is no default and no other allowed value.
+const SIGNUP_ROLES = ['ca', 'ops', 'dev'];
+export function assertSignupRole({ email, role, adminLookup }) {
+  const e = normalizeEmail(email);
+  const r = String(role || '').toLowerCase();
+  // ADMIN is never a sign-up choice, whichever email asks for it.
+  if (r === 'admin') {
+    return Promise.reject(new HttpError(403,
+      adminLookup
+        ? 'This email already has an ADMIN account. Switch to "Sign in".'
+        : 'ADMIN is not a sign-up choice. Sign in with your existing account; an existing ADMIN promotes others from the Staff tab.'));
+  }
+  if (!SIGNUP_ROLES.includes(r)) {
+    throw new HttpError(400, 'Sign-up requires choosing a role: CA, OM or DEV');
+  }
+  // The grandfathered org mailbox domains (the 59 CA / 3 admin emails) never
+  // self-mint an account: their owners already exist and sign in by email.
+  if (e.endsWith('@applywizz.com') || e.endsWith('@applywizz.ai')) {
+    return Promise.reject(new HttpError(403,
+      'This company email already belongs to an existing team member. Switch to "Sign in".'));
+  }
+  return Promise.resolve(r);
+}
 
 // OPS-tree endpoints a DEV/ADMIN may view for any manager by uuid.
 function managerScopeUuid(req) {
@@ -216,19 +242,16 @@ app.post('/api/auth/request-code', wrap(async (req) => {
     if (mode === 'signin') {
       throw new HttpError(404, 'No account found for that email. Switch to "Sign up" to create one.');
     }
-    const role = String(req.body.role || '').toLowerCase();
-    if (!VALID_ROLES.includes(role)) throw new HttpError(400, 'Choose a role: CA, OPS, DEV or ADMIN');
-    // ADMIN cannot be self-served: only the FIRST admin account can be
-    // created through sign-up (bootstrap); further admins are promoted
-    // by an existing ADMIN via /api/admin/staff/:uuid/role.
-    if (role === 'admin' && (await listStaff('admin')).length) {
-      throw new HttpError(403, 'ADMIN accounts cannot be self-created. Sign in with an existing ADMIN and promote a member from the Staff tab.');
-    }
+    const role = await assertSignupRole({
+      email,
+      role: req.body.role,
+      adminLookup: (await listStaff('admin')).some((a) => a.email === email)
+    });
     let managerId = req.body.managerId || null;
     if (role === 'ca') {
       const opsList = await listStaff('ops');
-      if (opsList.length && !managerId) throw new HttpError(400, 'Select your OPS manager to complete sign-up');
-      if (managerId && !opsList.some((o) => o.uuid === managerId)) throw new HttpError(400, 'Unknown OPS manager');
+      if (opsList.length && !managerId) throw new HttpError(400, 'Select your OM manager to complete sign-up');
+      if (managerId && !opsList.some((o) => o.uuid === managerId)) throw new HttpError(400, 'Unknown OM manager');
     } else {
       managerId = null;
     }

@@ -320,7 +320,13 @@ FK can ever break. Run it from the ADMIN Staff tab's confirm-gated *Fixture
 cleanup* (preview → tick → apply), `POST /api/dev/staff/purge` (dry-run unless
 `apply:true`), or `node scripts/purge-local-staff.js --apply`; `npm run seed`
 now seeds the real tree and purges, so a fresh checkout never re-creates a
-fixture. The DEV
+fixture. Sign-up
+only ever mints a brand-new person, and only as **CA, OM or DEV** — the pick
+is mandatory (`assertSignupRole` in `server.js` rejects an empty/invented role
+with 400 and ADMIN with 403; the grandfathered `@applywizz.com/.ai` emails of
+the 59 CAs and the admins can never self-mint and are pointed at *Sign in*).
+ADMIN exists only for the rostered admins and via promotion from the Staff tab
+(`/api/admin/staff/:uuid/role`). The DEV
 pane reads it at *Staff tree* (`/api/dev/staff/tree`) with a live
 `staffDirectoryStats()`. If the CRM names a CA outside the roster it is shown
 as `tree_unresolved` — that applicant gets its OM but no CA until you add the
@@ -404,13 +410,14 @@ has to open the URL to learn why there is nothing to fill.
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 184 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 193 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits
                       # + record-backed identity fields (phone) with no GenAI, the
                       # URL-placeholder guard, the model-free resume fallback and the
-                      # hung-run watchdog
+                      # hung-run watchdog, the fixture purge (delete vs retire) and
+                      # the sign-up role gate (CA/OM/DEV only, never ADMIN)
 ```
 
 ---
