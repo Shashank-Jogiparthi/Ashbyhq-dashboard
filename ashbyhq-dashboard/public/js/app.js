@@ -919,7 +919,9 @@ async function loadWorkHistoryList() {
 }
 
 async function openWhLogs(caUuid, from, to) {
-  $('wh-detail').innerHTML = '<p class="muted">Loading logs...</p>';
+  const detail = $('wh-detail');
+  detail.innerHTML = '<p class="muted">Loading logs...</p>';
+  detail.scrollIntoView({ behavior: 'smooth', block: 'start' });   // the pane sits below a long CA list
   try {
     const d = await api(`/api/work-history/ca/${caUuid}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
     const cards = d.awls.map((a) => `
@@ -929,12 +931,13 @@ async function openWhLogs(caUuid, from, to) {
         ${(a.records || []).map((r) => `<div class="muted small mono">${esc(r.workDate)} · ${esc(r.status || '')} · ${r.jobsApplied ?? 0} jobs · ${esc(r.source || '')}</div>`).join('')}
         ${(a.localApps || []).map((la) => `<div class="muted small">→ <a href="${esc(la.url)}" target="_blank" rel="noopener">${esc(la.company || '')} — ${esc(la.title || '')}</a> ${chip(la.status)}</div>`).join('')}
       </div>`).join('');
-    $('wh-detail').innerHTML = `<div class="card"><h3>${esc((d.ca && d.ca.name) || 'CA')} — AWL stack ${esc(from)} → ${esc(to)}</h3>
+    detail.innerHTML = `<div class="card"><h3>${esc((d.ca && d.ca.name) || 'CA')} — AWL stack ${esc(from)} → ${esc(to)} <button id="wh-detail-close" class="ghost" style="float:right;">Close ×</button></h3>
       ${cards || '<p class="muted">No cached work-history for this CA in the span.</p>'}
       <div class="actions"><button class="primary" id="wh-full-log">Open full CA log (screenshots / answers)</button></div>
       <div id="wh-full-pane"></div></div>`;
+    $('wh-detail-close').addEventListener('click', () => { detail.innerHTML = ''; });
     $('wh-full-log').addEventListener('click', () => renderCaSummaryInto($('wh-full-pane'), caUuid));
-  } catch (err) { $('wh-detail').innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
+  } catch (err) { detail.innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
 }
 
 async function renderWorkHistory() {
