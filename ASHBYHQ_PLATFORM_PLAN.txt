@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 193 checks pass.
+CA under them. 223 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1214,7 +1214,7 @@ and let OMs size their own CAs instead, starting at 25.
 verify:flow (step 7) asserts the four rule halves: an assignment is capped by
 the CA's own limit and NOT the manager's; a CA with no explicit limit defaults
 to 25; /api/ops/ca/:uuid/quota enforces the manager_id guard; and the OM
-Overview exposes the editable per-CA limit. 193 checks pass (see §14).
+Overview exposes the editable per-CA limit. 223 checks pass (see §14).
 
 ====================================================================
 14. v3.6a - THE RECORD FILLS WHAT IT HAS, WITHOUT WAITING ON GENAI
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 193 checks pass.
+"…Number" / location box abstains. 223 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,7 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 193 checks pass.
+watchdog kills + frees the slot. 223 checks pass.
 
 ====================================================================
 16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
@@ -1372,7 +1372,7 @@ One consequence the operator accepted: the whitelist also removes the old
 @applywizz.local DEV/admin-style logins. The two real ADMINs (@applywizz.ai)
 always remain, and DEV sign-up stays open, so access is never globally lost -
 but a re-created login should use an @applywizz.com/.ai address to survive the
-next cleanup. 193 checks pass.
+next cleanup. 223 checks pass.
 
 ====================================================================
 18. v3.6e - SIGN-UP MINTS ONLY CA / OM / DEV, NEVER ADMIN
@@ -1406,7 +1406,112 @@ RULE (not a setting), asserted in verify:flow step 8:
     requireRole('admin') - verify asserts no createStaff(...role:'admin') path
     exists outside sign-up.
 
-193 checks pass.
+223 checks pass.
 
-END OF CURRENT-STATE DOC (v3.6e) - previous v2 plan superseded; base
+====================================================================
+19. v3.6f - THE @applywizz.local DOMAIN IS DEAD, EVERYWHERE
+====================================================================
+v3.6d retired-but-kept the two @applywizz.local fixtures (rakesh CA,
+priya.cam OPS) because SUCCESS history still referenced them and the FK has
+no ON DELETE. The operator wanted them GONE from the whole DB, and wanted the
+addresses refused with an "invalid mail" error even if typed into sign-in or
+sign-up. Retire is the wrong fate for a never-real phantom: it still shows in
+the staff table. So the entire @applywizz.local domain is now declared dead.
+
+RULE (not a setting), asserted in verify:flow step 9:
+  * connector/staff-purge.js DEAD_FIXTURE_DOMAIN = 'applywizz.local' and
+    isForbiddenLoginEmail() - matches the EXACT domain, not a suffix, so
+    rakesh@ / priya.cam@ / Whoever@ApplyWizz.local are flagged while
+    evil.local or applywizz.localish are not.
+  * Auth (both steps): /api/auth/request-code and /api/auth/verify-code reject
+    a forbidden email with 400 'Invalid mail: ... can no longer sign in or sign
+    up.' BEFORE any account lookup, so the retired fixtures fail as invalid on
+    the sign-in tab AND the sign-up tab alike.
+  * removeDeadFixtures(): the finish-the-job step purgeLocalStaff only retired.
+    For every dead-domain row it DETACHES each reference separately -
+    applications.ca_id, applications.manager_id, applicants.ca_id, ops_id and
+    staff.manager_id are all nullable, and clearing ca_id and manager_id in
+    DISTINCT statements means a SUCCESS row that named the doomed CA but a
+    SURVIVING OM keeps that real OM - then deletes the staff row + its session/
+    otp. Guarded to the dead domain only, so a real @applywizz.com/.ai row (the
+    two ADMINs included) can NEVER be removed even if named in `emails`.
+    Idempotent. Wired into scripts/seed.js, the purge CLI --apply (and its dry
+    preview) and POST /api/dev/staff/purge, so a fresh checkout is clean too.
+
+Applied to the live Supabase DB: the two fixtures are deleted, the 6 SUCCESS
+rows they owned (12 references - ca_id on rakesh, manager_id on priya.cam, the
+same submissions) survive with only the phantom owner set NULL, 0 applicants
+moved (they were re-pointed in v3.6d), 64 real @applywizz staff and the 2 real
+admins untouched. Nothing recreates them: seedStaffDirectory only upserts roster
+rows, never the fixtures. 223 checks pass.
+
+====================================================================
+20. v3.7 - CA WORK-HISTORY + ca_data (DYNAMIC EXTERNAL APIs, VISIBILITY-ONLY)
+====================================================================
+The operator asked: persist the AWL -> CA -> OM(CAM) map so a CA's whole book
+shows under them, let OMs + DEV read each CA's day-to-day work over a from/to
+span, and keep the external endpoint configuration editable by DEV/ADMIN only,
+dynamically - never hardcoded, never in .env.
+
+  * THE INDEX (ca_data, both backends): one row per AWL-ID -> { ca_id, ca_email,
+    ca_ext_id, om_id, om_email, om_ext_id }, built purely from the CRM's
+    clients_additional_info (career_associate_id / career_associate_manager_id)
+    matched onto staff by ext_id. connector/ca-data.js buildCaData().
+
+  * THE EMAIL BRIDGE: ca_email resolves from the roster FIRST (staff.ext_id ->
+    staff.email); when the CRM names a CA uuid with NO staff row it falls back to
+    the external /api/ca/emails id->email map and records the email while leaving
+    ca_id NULL. We NEVER invent a person - an id absent from BOTH roster and the
+    emails feed stays unresolved and surfaced (e.g. 4f3b6068 / AWL-35186).
+
+  * VISIBILITY-ONLY ASSIGNMENT (the anti-flood rule): a refresh points every
+    applicant at its real CA/OM (applicants.ca_id/ops_id) so each CA sees their
+    clients, but it must NOT auto-create applications or a scan backlog. That is
+    enforced by a materialize switch threaded through db/store.js
+    upsertExternalApplicant + upsertApplicantJoblink (and connector/applicant-db.js
+    upsertCombined/syncFromPostgres): default true (every existing caller
+    unchanged), set false by the refresh so links land PENDING (materialized=0)
+    and no job_links/applications rows are written. verify proves both halves -
+    materialize:false adds a pending link and creates nothing; materialize:true
+    (the control) materialises exactly one.
+
+  * THE NUMBERS come from the external work-history API (full org activity,
+    including work this platform did not do), cached into ca_work_history keyed
+    (work_date, awl_id, ca_email) by connector/work-history.js
+    refreshWorkHistory(); ca_id is resolved from the cached email to staff.email.
+    A CA "worked" in a span = they have cached rows in it. getCaWorkHistory /
+    getCaWorkHistoryDetail read the cache over an inclusive [from,to]; the
+    innermost per-link detail re-attaches our own applications when that AWL+link
+    exists locally and falls back to the API aggregate otherwise.
+
+  * DYNAMIC, DEV/ADMIN-ONLY ENDPOINTS: nothing about the external APIs is
+    hardcoded or lives in .env. connector/external-apis.js reads
+    ext_api.ca_mgmt_base (required: /api/ca/emails + /api/ca/work-history),
+    ext_api.applywizz_base (optional: /api/get-client-details) and an optional
+    auth header/value from system_state AT CALL TIME (15s TTL), so a DEV edit
+    takes effect without a redeploy and no host string ever reaches source.
+    GET/POST /api/dev/settings/apis + POST /api/dev/settings/apis/test are
+    requireRole('dev','admin')-guarded; if ca_mgmt_base is unset every external
+    call degrades to { skipped:'not_configured' } and the view serves the cache.
+
+  * THE UI (public/js/app.js) adds a Work History tab to ops/dev/admin: a from/to
+    date block, an on-demand Refresh button (DEV/ADMIN - rebuilds ca_data + pulls
+    work-history), a table of CAs active in the span with distinct-AWL + jobs-
+    applied counts, a "View Logs" drill to that CA's AWL stack, and the existing
+    per-CA summary (screenshots / answers) for the innermost detail. DEV/ADMIN
+    additionally get the External APIs card (Save + per-endpoint Test).
+
+RULE (not a setting), asserted in verify:flow step 10: neither
+connector/external-apis.js nor server.js contains a literal endpoint host; the
+settings write route is DEV/ADMIN-guarded; the refresh route never calls
+queueUnscannedLinks; buildCaData resolves the rostered CA and the un-rostered
+email via the /api/ca/emails bridge while keeping an unknown ca_id NULL; the
+assignment is visibility-only (0 applications) with the materialize gate proven
+both ways; refreshWorkHistory upserts + resolves ca_id, is idempotent, and
+getCaWorkHistory/Detail honour [from,to] and CA scoping; the inner detail falls
+back to cache and attaches a local application; and an unset base skips the
+network entirely. Stacks on the working tree; no commit until the operator says
+so. 223 checks pass.
+
+END OF CURRENT-STATE DOC (v3.7) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

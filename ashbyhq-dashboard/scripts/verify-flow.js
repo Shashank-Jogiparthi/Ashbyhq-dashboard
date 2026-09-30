@@ -1033,6 +1033,215 @@ async function verifySignupRoles() {
     g8.status === 403 && g9.status === 403 && /Switch to "Sign in"/.test(g8.msg), JSON.stringify([g8, g9]));
 }
 
+async function verifyDeadFixtures() {
+  step('9. Dead @applywizz.local fixtures: fully removed from the DB + refused as invalid mail at auth');
+  const purge = await import('../connector/staff-purge.js');
+  const purgeSrc = fs.readFileSync(STAFF_PURGE_SCRIPT, 'utf8');
+  const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
+
+  // The forbidden set is the exact dead domain, not a suffix.
+  check('isForbiddenLoginEmail flags ONLY the dead @applywizz.local domain',
+    purge.isForbiddenLoginEmail('rakesh@applywizz.local') && purge.isForbiddenLoginEmail('priya.cam@applywizz.local')
+      && purge.isForbiddenLoginEmail('Whoever@ApplyWizz.local')
+      && !purge.isForbiddenLoginEmail('a@applywizz.ai') && !purge.isForbiddenLoginEmail('a@applywizz.com')
+      && !purge.isForbiddenLoginEmail('a@evil.local') && !purge.isForbiddenLoginEmail('a@applywizz.localish'));
+  check('both auth steps refuse a dead fixture with an "invalid mail" error',
+    (serverSrc.match(/isForbiddenLoginEmail\(email\)/g) || []).length >= 2
+      && /Invalid mail/.test(serverSrc));
+  check('removeDeadFixtures clears ca_id and manager_id SEPARATELY, never a real survivor',
+    /UPDATE applications SET ca_id = NULL WHERE ca_id = \?/.test(purgeSrc)
+      && /UPDATE applications SET manager_id = NULL WHERE manager_id = \?/.test(purgeSrc)
+      && /DELETE FROM staff WHERE uuid = \?/.test(purgeSrc));
+
+  // Round-trip on the SHARED DB with synthetic rows, scoped to the one dead
+  // email so the real retired fixtures are never touched from a test.
+  const DEAD = 'verify-dead-ca', KEEP = 'verify-dead-keep';
+  const SUB = 'verify-dead-sub', AWL_D = 'AWL-VERIFY-DEAD', nowD = nowIso();
+  try {
+    const mk = (u, email, role, mgr) => db.prepare(
+      "INSERT INTO staff (uuid, email, name, role, manager_id, applicant_quota, active, last_sign_in, created_at) VALUES (?, ?, 'VD', ?, ?, 25, 1, NULL, ?)"
+    ).run(u, email, role, mgr ?? null, nowD);
+    await mk(DEAD, 'verify-dead@applywizz.local', 'ca');            // a lingering fixture (doomed)
+    await mk(KEEP, 'verify-dead-keep@applywizz.ai', 'ops');          // a real survivor
+    await mk(SUB, 'verify-dead-sub@applywizz.ai', 'ca', DEAD);       // its manager is the fixture
+    await db.prepare('INSERT INTO applicants (awl_id, full_name, email, ca_id) VALUES (?, ?, ?, ?) ON CONFLICT (awl_id) DO UPDATE SET ca_id = EXCLUDED.ca_id')
+      .run(AWL_D, 'VD', 'vd@invalid.local', DEAD);
+    const link = await makeLink(URL_A);
+    // SUCCESS history the plain purge would only RETIRE around: it names the
+    // doomed CA (ca_id) AND a surviving OM (manager_id) on the SAME row.
+    await db.prepare('INSERT INTO applications (awl_id, link_id, ca_id, manager_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (awl_id, link_id) DO UPDATE SET status = EXCLUDED.status, ca_id = EXCLUDED.ca_id, manager_id = EXCLUDED.manager_id')
+      .run(AWL_D, link, DEAD, KEEP, 'SUCCESS', nowD, nowD);
+
+    const preview = await purge.removeDeadFixtures({ emails: ['verify-dead@applywizz.local'], dryRun: true, actor: 'verify' });
+    check('a dry run names the doomed fixture but removes nothing',
+      preview.wouldRemove.length === 1 && preview.wouldRemove[0].uuid === DEAD && preview.removed.length === 0
+        && Boolean(await db.prepare('SELECT uuid FROM staff WHERE uuid = ?').get(DEAD)));
+    // A @applywizz.ai email named in `emails` is refused (not the dead domain).
+    const refused = await purge.removeDeadFixtures({ emails: ['verify-dead-keep@applywizz.ai'], dryRun: false, actor: 'verify' });
+    check('a real @applywizz staff row can NEVER be removed, even if named',
+      refused.removed.length === 0 && Boolean(await db.prepare('SELECT uuid FROM staff WHERE uuid = ?').get(KEEP)));
+
+    const rep = await purge.removeDeadFixtures({ emails: ['verify-dead@applywizz.local'], actor: 'verify' });
+    check('the dead fixture is DELETED outright (not just retired)', !(await db.prepare('SELECT uuid FROM staff WHERE uuid = ?').get(DEAD)));
+    const app = await db.prepare('SELECT ca_id, manager_id FROM applications WHERE awl_id = ? AND link_id = ?').get(AWL_D, link);
+    check('its SUCCESS history row survives with the doomed ca_id detached', app && app.ca_id == null);
+    check('...and the SURVIVING manager on that same row is preserved (separate detach)', app && app.manager_id === KEEP);
+    const ap = await db.prepare('SELECT ca_id FROM applicants WHERE awl_id = ?').get(AWL_D);
+    check('the applicant row is kept, its doomed ca_id set NULL', Boolean(ap) && ap.ca_id == null);
+    const sub = await db.prepare('SELECT manager_id FROM staff WHERE uuid = ?').get(SUB);
+    check('a subordinate whose manager was the fixture is detached, not deleted', Boolean(sub) && sub.manager_id == null);
+    const rep2 = await purge.removeDeadFixtures({ emails: ['verify-dead@applywizz.local'], actor: 'verify' });
+    check('removal is idempotent - a second run removes nobody', rep2.removed.length === 0);
+  } finally {
+    await db.prepare('DELETE FROM application_events WHERE application_id IN (SELECT id FROM applications WHERE awl_id = ?)').run(AWL_D);
+    await db.prepare('DELETE FROM applications WHERE awl_id = ?').run(AWL_D);
+    await db.prepare('DELETE FROM applicants WHERE awl_id = ?').run(AWL_D);
+    await db.prepare('DELETE FROM staff WHERE uuid IN (?, ?, ?)').run(DEAD, KEEP, SUB);
+  }
+}
+
+/* ---- v3.7 step 10: CA work-history + ca_data + dynamic external APIs ---- */
+async function verifyCaWorkHistory() {
+  step('10. CA work-history: dynamic APIs (no hardcoding), ca_data bridge, visibility-only assign, cached history + fallback');
+  const { buildCaData } = await import('../connector/ca-data.js');
+  const { refreshWorkHistory } = await import('../connector/work-history.js');
+  const {
+    getCaWorkHistory, getCaWorkHistoryDetail, findStaffByExtId, upsertExternalApplicant, upsertApplicantJoblink
+  } = await import('../db/store.js');
+  const extSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'connector', 'external-apis.js'), 'utf8');
+  const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
+
+  // ---- A. No hardcoding + guard rules ----
+  const HOSTS = ['applywizz-ca-management.vercel.app', 'apply-wizz.me'];
+  const hasHost = (s) => HOSTS.some((h) => s.includes(h));
+  check('external-apis.js hardcodes NO endpoint host (bases come from system_state)', !hasHost(extSrc));
+  check('server.js hardcodes NO endpoint host', !hasHost(serverSrc));
+  check('the external-API settings write route is DEV/ADMIN-guarded',
+    serverSrc.includes(`app.post('/api/dev/settings/apis', requireAuth, requireRole('dev', 'admin')`));
+  const refreshIdx = serverSrc.indexOf(`'/api/dev/ca-data/refresh'`);
+  const refreshBlock = refreshIdx >= 0 ? serverSrc.slice(refreshIdx, serverSrc.indexOf('}));', refreshIdx)) : '';
+  check('the ca-data refresh route never queues scans (visibility only)',
+    refreshIdx >= 0 && refreshBlock.length > 0 && !refreshBlock.includes('queueUnscannedLinks'));
+
+  // ---- fixtures ----
+  const BALAJI_EXT = '9dc9376e-fbc5-440b-932f-38da10b89a70';
+  const TESTCA_UUID = 'verify-wh-ca';
+  const TESTCA_EMAIL = 'verify-wh-ca@applywizz.ai';
+  const UNROST_EMAIL = 'verify-wh-unrost@applywizz.ai';
+  const AWL_VIS = 'AWL-VERIFY-WH1';   // rostered CA, visibility-only, cache-only detail
+  const AWL_UNROST = 'AWL-VERIFY-WH2'; // CA uuid absent from roster, present in /api/ca/emails
+  const AWL_LOC = 'AWL-VERIFY-WH3';    // rostered CA, has a local application (inner detail)
+  const AWL_GUARD = 'AWL-VERIFY-WHG';  // proves the materialize flag actually gates
+  const URL_VIS = 'https://jobs.ashbyhq.com/verify/9a9a9a9a-9a9a-4a9a-8a9a-9a9a9a9a9a9a';
+  const URL_G = 'https://jobs.ashbyhq.com/verify/8b8b8b8b-8b8b-4b8b-8b8b-8b8b8b8b8b8b';
+  const URL_L = 'https://jobs.ashbyhq.com/verify/7c7c7c7c-7c7c-4c7c-8c7c-7c7c7c7c7c7c';
+  const nowW = nowIso();
+
+  const ceImpl = async () => ({ ok: true, count: 2, users: [
+    { id: 'verify-wh-ca-ext', name: 'WH CA', email: TESTCA_EMAIL, role: 'ca' },
+    { id: 'verify-wh-unrost-ext', name: 'WH Un', email: UNROST_EMAIL, role: 'ca' }
+  ] });
+  const infoRows = async () => [
+    { applywizz_id: AWL_VIS, full_name: 'WH Roster', personal_email: 'r@x.z', career_associate_id: 'verify-wh-ca-ext', career_associate_manager_id: BALAJI_EXT },
+    { applywizz_id: AWL_UNROST, full_name: 'WH Unroster', personal_email: '', career_associate_id: 'verify-wh-unrost-ext', career_associate_manager_id: BALAJI_EXT }
+  ];
+
+  let balajiUuid = null;
+  try {
+    await db.prepare(`INSERT INTO staff (uuid, email, name, role, manager_id, applicant_quota, ext_id, active, last_sign_in, created_at)
+      VALUES (?, ?, 'WH Test CA', 'ca', NULL, 25, 'verify-wh-ca-ext', 1, NULL, ?)`).run(TESTCA_UUID, TESTCA_EMAIL, nowW);
+
+    // ---- B + C. buildCaData ----
+    const res = await buildCaData({ dryRun: false, actor: 'verify', readInfoRows: infoRows, caEmailsImpl: ceImpl });
+    balajiUuid = (await findStaffByExtId(BALAJI_EXT))?.uuid || null;
+    const cdVis = await db.prepare('SELECT * FROM ca_data WHERE awl_id = ?').get(AWL_VIS);
+    const cdUn = await db.prepare('SELECT * FROM ca_data WHERE awl_id = ?').get(AWL_UNROST);
+    check('ca_data resolves the rostered CA (ca_id + roster email + OM + ext provenance)',
+      cdVis && cdVis.ca_id === TESTCA_UUID && String(cdVis.ca_email).toLowerCase() === TESTCA_EMAIL
+        && cdVis.om_id === balajiUuid && cdVis.ca_ext_id === 'verify-wh-ca-ext');
+    check('ca_data resolves an un-rostered CA email via the /api/ca/emails bridge, ca_id stays NULL (never invented)',
+      cdUn && cdUn.ca_id == null && String(cdUn.ca_email).toLowerCase() === UNROST_EMAIL && cdUn.ca_ext_id === 'verify-wh-unrost-ext');
+    const apVis = await db.prepare('SELECT ca_id, ops_id FROM applicants WHERE awl_id = ?').get(AWL_VIS);
+    check('visibility-only assignment set the applicant ca_id + ops_id',
+      apVis && apVis.ca_id === TESTCA_UUID && apVis.ops_id === balajiUuid);
+    const appsAfterBuild = Number((await db.prepare('SELECT COUNT(1) AS n FROM applications WHERE awl_id = ?').get(AWL_VIS))?.n || 0);
+    check('buildCaData created NO applications (anti-flood)', appsAfterBuild === 0);
+
+    // guard: adding a link to a CA-attached applicant with materialize:false stays pending
+    const pend = await upsertApplicantJoblink(AWL_VIS, { url: URL_VIS, materialize: false });
+    const noLink = !(await db.prepare('SELECT id FROM job_links WHERE url = ?').get(URL_VIS));
+    const noAppVis = Number((await db.prepare('SELECT COUNT(1) AS n FROM applications WHERE awl_id = ?').get(AWL_VIS))?.n || 0) === 0;
+    check('materialize:false adds a pending link but creates NO job_links/application', pend.materialized === false && noLink && noAppVis);
+    // control: materialize:true DOES create one (proves the flag is the gate)
+    await upsertExternalApplicant({ awlId: AWL_GUARD, fullName: 'WH Guard', email: '', caId: TESTCA_UUID, opsId: balajiUuid, materialize: false });
+    const mat = await upsertApplicantJoblink(AWL_GUARD, { url: URL_G, materialize: true });
+    const guardApps = Number((await db.prepare('SELECT COUNT(1) AS n FROM applications WHERE awl_id = ?').get(AWL_GUARD))?.n || 0);
+    check('control: materialize:true on a CA-attached applicant DOES materialise one application', mat.materialized === true && guardApps === 1);
+
+    // ---- D. refreshWorkHistory cache + resolve + idempotent + range ----
+    const FROM = '2026-01-05', TO = '2026-01-06';
+    const FIX = {
+      [TESTCA_EMAIL]: [
+        { date: '2026-01-05', applywizz_id: AWL_VIS, ca_email: TESTCA_EMAIL, client_name: 'Roster', client_email: 'r@x.z', jobs_applied: 25, emails_submitted: 25, emails_required: 25, status: 'Completed', source: 'live' },
+        { date: '2026-01-06', applywizz_id: AWL_LOC, ca_email: TESTCA_EMAIL, client_name: 'Local', client_email: 'l@x.z', jobs_applied: 5, emails_submitted: 5, emails_required: 5, status: 'Completed', source: 'live' },
+        { date: '2026-01-10', applywizz_id: AWL_VIS, ca_email: TESTCA_EMAIL, client_name: 'Out', client_email: '', jobs_applied: 99, emails_submitted: 99, emails_required: 99, status: 'Completed', source: 'live' }
+      ],
+      [UNROST_EMAIL]: [
+        { date: '2026-01-05', applywizz_id: AWL_UNROST, ca_email: UNROST_EMAIL, client_name: 'Un', client_email: '', jobs_applied: 3, emails_submitted: 3, emails_required: 3, status: 'Completed', source: 'live' }
+      ]
+    };
+    const whImpl = async ({ caEmail }) => ({ ok: true, records: FIX[String(caEmail).toLowerCase()] || [], total: (FIX[String(caEmail).toLowerCase()] || []).length });
+    const wh = await refreshWorkHistory({ from: FROM, to: TO, caEmailsImpl: ceImpl, workHistoryImpl: whImpl });
+    const cwhVis = await db.prepare('SELECT ca_id FROM ca_work_history WHERE awl_id = ? AND work_date = ? AND ca_email = ?').get(AWL_VIS, '2026-01-05', TESTCA_EMAIL);
+    const cwhUn = await db.prepare('SELECT ca_id FROM ca_work_history WHERE awl_id = ?').get(AWL_UNROST);
+    check('refreshWorkHistory upserts + resolves ca_id from the cached email', wh.upserted >= 4 && cwhVis && cwhVis.ca_id === TESTCA_UUID);
+    check('refreshWorkHistory leaves an un-rostered email ca_id NULL', cwhUn && cwhUn.ca_id == null);
+    const before = Number((await db.prepare('SELECT COUNT(1) AS n FROM ca_work_history WHERE ca_email IN (?, ?)').get(TESTCA_EMAIL, UNROST_EMAIL))?.n || 0);
+    await refreshWorkHistory({ from: FROM, to: TO, caEmailsImpl: ceImpl, workHistoryImpl: whImpl });
+    const after = Number((await db.prepare('SELECT COUNT(1) AS n FROM ca_work_history WHERE ca_email IN (?, ?)').get(TESTCA_EMAIL, UNROST_EMAIL))?.n || 0);
+    check('refresh is idempotent on re-pull (no duplicate rows)', before === after && before > 0);
+
+    const aggFull = await getCaWorkHistory([TESTCA_UUID], FROM, TO);
+    const e = aggFull[0] || {};
+    check('getCaWorkHistory aggregates only in-range rows for that CA (out-of-range excluded)',
+      aggFull.length === 1 && e.awls === 2 && e.jobsApplied === 30);
+    const aggOne = await getCaWorkHistory([TESTCA_UUID], '2026-01-06', '2026-01-06');
+    check('getCaWorkHistory honours a narrowed [from,to]', (aggOne[0] || {}).awls === 1 && (aggOne[0] || {}).jobsApplied === 5);
+    const aggBalaji = await getCaWorkHistory(balajiUuid ? [balajiUuid] : [], FROM, TO);
+    check('scoping to a uuid set returns only that CA\'s rows (OM sees just their tree)', aggBalaji.length === 0 && aggFull.length === 1);
+
+    // ---- E. inner detail: cache-only fallback + local application attach ----
+    // applications.awl_id has an FK to applicants, so the local-attach test needs
+    // its applicant row first (visibility-only, so no applications of its own).
+    await upsertExternalApplicant({ awlId: AWL_LOC, fullName: 'WH Local', email: '', caId: TESTCA_UUID, opsId: balajiUuid, materialize: false });
+    const linkL = await makeLink(URL_L);
+    await db.prepare('INSERT INTO applications (awl_id, link_id, ca_id, manager_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(AWL_LOC, linkL, TESTCA_UUID, balajiUuid, 'SUCCESS', nowW, nowW);
+    const detail = await getCaWorkHistoryDetail(TESTCA_UUID, FROM, TO);
+    const gVis = detail.find((x) => x.awl_id === AWL_VIS) || {};
+    const gLoc = detail.find((x) => x.awl_id === AWL_LOC) || {};
+    check('detail: a cached AWL with no local application still renders from cache', detail.length >= 1 && gVis.awl_id === AWL_VIS && (gVis.localApps || []).length === 0);
+    check('detail: a cached AWL with a local application attaches its per-link detail', gLoc.awl_id === AWL_LOC && (gLoc.localApps || []).length === 1 && gLoc.localApps[0].status === 'SUCCESS');
+
+    // ---- F. graceful degrade (unset base => no network call) ----
+    let whCalled = false;
+    const spy = async () => { whCalled = true; return { ok: true, records: [], total: 0 }; };
+    const deg = await refreshWorkHistory({ from: FROM, to: TO, caEmailsImpl: async () => ({ ok: false, skipped: 'not_configured', users: [] }), workHistoryImpl: spy });
+    check('graceful degrade: unset ca_mgmt_base returns not_configured and never calls the network', deg.skipped === 'not_configured' && whCalled === false);
+  } finally {
+    for (const awl of [AWL_VIS, AWL_UNROST, AWL_LOC, AWL_GUARD]) {
+      await db.prepare('DELETE FROM application_events WHERE application_id IN (SELECT id FROM applications WHERE awl_id = ?)').run(awl);
+      await db.prepare('DELETE FROM applications WHERE awl_id = ?').run(awl);
+      await db.prepare('DELETE FROM applicant_joblinks WHERE awl_id = ?').run(awl);
+      await db.prepare('DELETE FROM applicants WHERE awl_id = ?').run(awl);
+      await db.prepare('DELETE FROM ca_data WHERE awl_id = ?').run(awl);
+    }
+    for (const u of [URL_VIS, URL_G, URL_L]) await db.prepare('DELETE FROM job_links WHERE url = ?').run(u);
+    await db.prepare('DELETE FROM ca_work_history WHERE ca_email IN (?, ?)').run(TESTCA_EMAIL, UNROST_EMAIL);
+    await db.prepare('DELETE FROM staff WHERE uuid = ?').run(TESTCA_UUID);
+  }
+}
+
 async function verifyCrmFetch() {
   step('6. CRM fetch (--crm only; needs the Azure connection)');
   const { isConfigured, syncApplicantByAwl } = await import('../connector/applicant-db.js');
@@ -1057,6 +1266,8 @@ try {
   await verifyCsvParser();
   await verifyStaffDirectory();
   await verifySignupRoles();
+  await verifyDeadFixtures();
+  await verifyCaWorkHistory();
   if (process.argv.includes('--crm')) await verifyCrmFetch();
 } catch (err) {
   failed += 1;

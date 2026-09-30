@@ -182,7 +182,7 @@ async function resolveOpsFromExternal(info) {
   return ((await findStaffByExtId(String(extManager)))?.uuid) || null;
 }
 
-async function upsertCombined(prof, info, { opsId, summary }) {
+async function upsertCombined(prof, info, { opsId, summary, materialize = true }) {
   const mapped = mapCombined(prof || {}, info || {});
   if (!mapped.awlId) { if (summary) summary.skipped += 1; return null; }
   // The AWL-ID -> CA -> OM(CAM) tree is read from clients_additional_info
@@ -196,7 +196,7 @@ async function upsertCombined(prof, info, { opsId, summary }) {
     awlId: mapped.awlId, fullName: mapped.fullName, email: mapped.email,
     phone: mapped.phone, resumeAddress: mapped.resumeAddress,
     profileJson: JSON.stringify(mapped.profile), extId: mapped.extId,
-    opsId: targetOps, caId: tree.caId
+    opsId: targetOps, caId: tree.caId, materialize
   });
   if (summary) {
     if (res.created) summary.created += 1; else summary.updated += 1;
@@ -204,7 +204,7 @@ async function upsertCombined(prof, info, { opsId, summary }) {
     if (tree.caUnresolved || tree.omUnresolved) summary.tree_unresolved = (summary.tree_unresolved || 0) + 1;
   }
   for (const link of mapped.links) {
-    await upsertApplicantJoblink(mapped.awlId, { url: link.url, company: link.company || '', title: link.title || '' });
+    await upsertApplicantJoblink(mapped.awlId, { url: link.url, company: link.company || '', title: link.title || '', materialize });
     if (summary) summary.links += 1;
   }
   return res;
@@ -266,7 +266,7 @@ export async function buildAwlCaIndex() {
 
 // Pull the two tables (optionally filtered to a single AWL-ID), join in JS on
 // applywizz_id, and stream every applicant into the local store.
-export async function syncFromPostgres({ opsId = null, awlId = null } = {}) {
+export async function syncFromPostgres({ opsId = null, awlId = null, materialize = true } = {}) {
   const cfg = pgConfig();
   // This used to promise PG_CONNECTION_STRING alone would work while pgConfig()
   // returned null without a PGHOST - a host that set only a URL was told it was
@@ -301,7 +301,7 @@ export async function syncFromPostgres({ opsId = null, awlId = null } = {}) {
       if (!awl) { summary.skipped += 1; continue; }
       seenAwls.add(awl);
       summary.seen += 1;
-      await upsertCombined(cp, infoByAwl.get(awl) || null, { opsId, summary });
+      await upsertCombined(cp, infoByAwl.get(awl) || null, { opsId, summary, materialize });
     }
     // Applicants that exist only in the info table (no profile row yet).
     for (const ca of infos) {
@@ -309,7 +309,7 @@ export async function syncFromPostgres({ opsId = null, awlId = null } = {}) {
       if (!awl || seenAwls.has(awl)) continue;
       seenAwls.add(awl);
       summary.seen += 1;
-      await upsertCombined(null, ca, { opsId, summary });
+      await upsertCombined(null, ca, { opsId, summary, materialize });
     }
 
     // Job links: public.ashby_joblinks (awl_id -> job_links[]), the table the
@@ -325,7 +325,7 @@ export async function syncFromPostgres({ opsId = null, awlId = null } = {}) {
         const awl = normalizeAwlId(row.awl_id);
         if (!awl) continue;
         for (const url of row.job_links) {
-          await upsertApplicantJoblink(awl, { url, company: '', title: '' });
+          await upsertApplicantJoblink(awl, { url, company: '', title: '', materialize });          // registers, keeps questions
           await upsertJobLinkQuestions({ url });          // registers, keeps questions
           summary.links += 1;
         }
@@ -340,7 +340,7 @@ export async function syncFromPostgres({ opsId = null, awlId = null } = {}) {
         const awl = normalizeAwlId(lr.applywizz_id || lr.awl_id);
         const url = lr.url || lr.job_link;
         if (awl && url) {
-          await upsertApplicantJoblink(awl, { url, company: lr.company || '', title: lr.title || '' });
+          await upsertApplicantJoblink(awl, { url, company: lr.company || '', title: lr.title || '', materialize });
           summary.links += 1;
         }
       }

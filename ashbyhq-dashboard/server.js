@@ -46,6 +46,8 @@ import {
   readTable,
   getSystemState,
   setSystemState,
+  getCaWorkHistory,
+  getCaWorkHistoryDetail,
   upsertExternalApplicant
 } from './db/store.js';
 import { sendAuthCode } from './core/mailer.js';
@@ -57,7 +59,12 @@ import { enqueueLinkScans, scanQueueState, scanStateForUrl, start as startScanWo
 import { checkBrowser } from './core/browser-check.js';
 import { syncFromPostgres, syncApplicantByAwl, ingestDocument, normalizeAwlId, isConfigured as connectorConfigured, buildStaffTree, buildAwlCaIndex } from './connector/applicant-db.js';
 import { staffDirectoryStats } from './connector/staff-directory.js';
-import { purgeLocalStaff } from './connector/staff-purge.js';
+import { purgeLocalStaff, isForbiddenLoginEmail, removeDeadFixtures } from './connector/staff-purge.js';
+import { buildCaData, caDataStats } from './connector/ca-data.js';
+import { refreshWorkHistory } from './connector/work-history.js';
+import {
+  EXT_API_KEYS, extApiSettings, clearExtApiCache, caEmails, workHistory, clientDetails
+} from './connector/external-apis.js';
 import { runDraftPass, buildReviewQuestions } from './draft-service.js';
 import {
   listFieldAnswers,
@@ -234,6 +241,10 @@ function handleError(res, error) {
 app.post('/api/auth/request-code', wrap(async (req) => {
   const email = await normalizeEmail(req.body.email);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, 'Enter a valid email address');
+  // The @applywizz.local fixture domain is permanently dead: those retired
+  // test addresses (rakesh@, priya.cam@ and any other) can neither sign in nor
+  // sign up, so reject them as invalid mail before any account lookup happens.
+  if (isForbiddenLoginEmail(email)) throw new HttpError(400, 'Invalid mail: this address is retired and can no longer sign in or sign up.');
   const mode = String(req.body.mode || 'signup').toLowerCase() === 'signin' ? 'signin' : 'signup';
 
   let user = await findStaffByEmail(email);
@@ -280,6 +291,7 @@ async function logLogin(user, kind) {
 // Step 2: verify the code -> session token.
 app.post('/api/auth/verify-code', wrap(async (req) => {
   const email = await normalizeEmail(req.body.email);
+  if (isForbiddenLoginEmail(email)) throw new HttpError(400, 'Invalid mail: this address is retired and can no longer sign in or sign up.');
   const user = await findStaffByEmail(email);
   if (!user) throw new HttpError(400, 'Account not found');
   await verifyOtp(email, req.body.code);
@@ -658,7 +670,12 @@ app.post('/api/dev/staff/purge', requireAuth, requireRole('dev', 'admin'), wrap(
   const resolveApplicant = index
     ? async (app) => index.get(normalizeAwlId(app.awl_id)) || null
     : null;
-  return { report: await purgeLocalStaff({ resolveApplicant, dryRun, actor: req.user.uuid }) };
+  const report = await purgeLocalStaff({ resolveApplicant, dryRun, actor: req.user.uuid });
+  // Finish the job: purgeLocalStaff only RETIRES a fixture still pinned by
+  // SUCCESS history; this detaches those references and DELETES the dead
+  // @applywizz.local rows for good (real @applywizz staff are never touched).
+  const fixtures = await removeDeadFixtures({ dryRun, actor: req.user.uuid });
+  return { report, fixtures };
 }));
 
 // Load one exported applicant document (the { client, additional_information } shape).
@@ -688,6 +705,109 @@ app.post('/api/dev/staff/tree', requireAuth, requireRole('dev', 'admin'), wrap(a
 app.get('/api/dev/staff/tree', requireAuth, requireRole('dev', 'admin'), wrap(async () => ({
   stats: await staffDirectoryStats(), connector: connectorConfigured()
 })));
+
+/* ---------------- v3.7 CA work-history + ca_data + dynamic APIs ------ */
+
+// Inclusive [from,to] day span: query wins, else the DEV-set default, else today.
+function todayIso() { return new Date().toISOString().slice(0, 10); }
+async function workHistorySpan(req) {
+  const dFrom = await getSystemState('work_history_default_from', '');
+  const dTo = await getSystemState('work_history_default_to', '');
+  const from = String(req.query.from || req.body?.from || dFrom || todayIso());
+  const to = String(req.query.to || req.body?.to || dTo || todayIso());
+  return { from, to };
+}
+
+// The CAs whose work-history the caller may see: an OM sees only their tree, a
+// DEV/ADMIN sees every active CA (optionally narrowed by ?managerId=).
+async function scopedCas(req) {
+  const allCa = (await listStaff('ca')).filter((c) => c.active);
+  if (req.user.role === 'ops') return allCa.filter((c) => c.manager_id === req.user.uuid);
+  const mgr = req.query.managerId;
+  return mgr ? allCa.filter((c) => c.manager_id === mgr) : allCa;
+}
+
+// External API settings: DEV/ADMIN-only, kept in system_state so nothing is
+// hardcoded or lives in .env; the connectors re-read them at call time.
+app.get('/api/dev/settings/apis', requireAuth, requireRole('dev', 'admin'), wrap(async () => {
+  const cfg = await extApiSettings();
+  return {
+    caMgmtBase: cfg.caMgmtBase,
+    applywizzBase: cfg.applywizzBase,
+    authHeader: cfg.authHeader,
+    authValue: cfg.authValue
+  };
+}));
+
+app.post('/api/dev/settings/apis', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => {
+  const b = req.body || {};
+  await setSystemState(EXT_API_KEYS.caMgmtBase, String(b.caMgmtBase || '').trim());
+  await setSystemState(EXT_API_KEYS.applywizzBase, String(b.applywizzBase || '').trim());
+  await setSystemState(EXT_API_KEYS.authHeader, String(b.authHeader || '').trim());
+  await setSystemState(EXT_API_KEYS.authValue, String(b.authValue || '').trim());
+  clearExtApiCache();
+  const cfg = await extApiSettings();
+  return { ok: true, caMgmtBase: cfg.caMgmtBase, applywizzBase: cfg.applywizzBase, authHeader: cfg.authHeader };
+}));
+
+// Connectivity probe against the CURRENT saved settings (never saves anything).
+app.post('/api/dev/settings/apis/test', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => {
+  const which = String(req.body?.which || 'ca_emails');
+  try {
+    if (which === 'work_history') {
+      const { from, to } = await workHistorySpan(req);
+      const r = await workHistory({ caEmail: req.body?.caEmail, from, to });
+      if (r.skipped) return { ok: false, skipped: r.skipped };
+      return { ok: r.ok, sample_count: r.records.length, total: r.total };
+    }
+    if (which === 'client_details') {
+      const r = await clientDetails(req.body?.awlId || 'AWL-35186');
+      if (r.skipped) return { ok: false, skipped: r.skipped };
+      return { ok: r.ok, sample: Boolean(r.data) };
+    }
+    const r = await caEmails();
+    if (r.skipped) return { ok: false, skipped: r.skipped };
+    return { ok: r.ok, sample_count: r.count };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}));
+
+// On-demand refresh: rebuild ca_data (visibility-only assignment) then pull the
+// external work-history for the span. Never calls queueUnscannedLinks.
+app.post('/api/dev/ca-data/refresh', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => {
+  const { from, to } = await workHistorySpan(req);
+  const dryRun = req.body?.dryRun === true;
+  const caData = await buildCaData({ dryRun, actor: req.user.uuid });
+  const wh = dryRun ? { skipped: 'dry_run' } : await refreshWorkHistory({ from, to });
+  return { from, to, caData, workHistory: wh, stats: await caDataStats() };
+}));
+
+// CA capacity over a span, scoped to the caller's tree.
+app.get('/api/work-history', requireAuth, requireRole('ops', 'dev', 'admin'), wrap(async (req) => {
+  const { from, to } = await workHistorySpan(req);
+  const cas = await scopedCas(req);
+  const agg = await getCaWorkHistory(cas.map((c) => c.uuid), from, to);
+  const byUuid = new Map(cas.map((c) => [c.uuid, c]));
+  return {
+    from, to,
+    cas: agg.map((a) => {
+      const s = byUuid.get(a.caId) || {};
+      return { ca: { uuid: a.caId, name: s.name, email: s.email }, awls: a.awls, jobsApplied: a.jobsApplied, byStatus: a.byStatus };
+    }).sort((x, y) => y.jobsApplied - x.jobsApplied)
+  };
+}));
+
+// A CA's AWL stack in the span + any locally-applied detail. OM restricted to own tree.
+app.get('/api/work-history/ca/:uuid', requireAuth, requireRole('ops', 'dev', 'admin'), wrap(async (req) => {
+  if (req.user.role === 'ops') {
+    const caRow = await getStaff(req.params.uuid);
+    if (!caRow || caRow.role !== 'ca' || caRow.manager_id !== req.user.uuid) throw new HttpError(403, 'That CA is not under you');
+  }
+  const { from, to } = await workHistorySpan(req);
+  const ca = await getStaff(req.params.uuid);
+  return { from, to, ca: ca ? { uuid: ca.uuid, name: ca.name, email: ca.email } : null, awls: await getCaWorkHistoryDetail(req.params.uuid, from, to) };
+}));
 
 // Any route that can introduce links funnels through here: links with no field
 // inventory yet get a background pre-scan, so a CA never lands on an empty pane.

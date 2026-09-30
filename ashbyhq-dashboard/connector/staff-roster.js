@@ -95,11 +95,15 @@ export const ADMIN_ROSTER = [
 ];
 
 // Legacy @applywizz.local test fixtures. These are NOT part of the real CRM
-// tree. seedStaffDirectory() still retires them (active=0) so a host that has
-// not run the purge keeps them out of sign-in; the actual removal is the staff
-// purge (connector/staff-purge.js): a fixture that owns nothing is DELETED, and
-// one still pinned by unresolvable work or SUCCESS history is RETIRED so no
-// foreign key ever breaks. The real @applywizz.com/.ai staff are always kept.
+// tree. The whole @applywizz.local domain is now permanently DEAD: seedStaffDirectory()
+// retires any still-present fixture (active=0), the staff purge (connector/
+// staff-purge.js) deletes the ones that own nothing, and removeDeadFixtures()
+// detaches the nullable references on any that SUCCESS history still pins (the
+// old rakesh / priya.cam pair) and deletes them outright - so no fixture row
+// ever lingers. Auth refuses the domain as invalid mail, so a retired address
+// can neither sign in nor sign up. The real @applywizz.com/.ai staff are always
+// kept. This list is only what seedStaffDirectory still has to retire in place
+// on a host that has not run the purge yet.
 export const FIXTURES_TO_RETIRE = [
   'admin2026@applywizz.local',
   'sana@applywizz.local',

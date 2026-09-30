@@ -16,7 +16,7 @@
  */
 import { migrate, db } from '../db/index.js';
 import { buildStaffTree } from '../connector/applicant-db.js';
-import { purgeLocalStaff } from '../connector/staff-purge.js';
+import { purgeLocalStaff, removeDeadFixtures } from '../connector/staff-purge.js';
 
 await migrate();
 
@@ -29,6 +29,12 @@ console.log(`purge: ${purged.deleted.length} fixture(s) deleted, ${purged.retire
 for (const d of purged.deleted) console.log(`  deleted  ${d.role.toUpperCase().padEnd(4)} ${d.email}`);
 for (const r of purged.retired) console.log(`  retired  ${r.role.toUpperCase().padEnd(4)} ${r.email}${r.refs ? `  (owns ${r.refs.applicants} applicant(s), ${r.refs.applications} app(s))` : ''}`);
 
+// Retire is not enough for a never-real fixture: detach any leftover references
+// (nullable ca_id/manager_id/ops_id) and DELETE the lingering @applywizz.local
+// rows so the phantom disappears from the staff table entirely.
+const gone = await removeDeadFixtures({ actor: 'seed' });
+for (const g of gone.removed) console.log(`  removed  ${g.role.toUpperCase().padEnd(4)} ${g.email}  (detached ${g.detached.applications} app(s), ${g.detached.applicants} applicant(s))`);
+
 const left = await db.prepare('SELECT COUNT(*) AS n FROM staff WHERE active = 1').get();
-const local = await db.prepare("SELECT email FROM staff WHERE lower(email) LIKE '%@applywizz.local' AND active = 1").all();
-console.log(`\nActive staff now: ${left.n}. Remaining active @applywizz.local fixtures: ${local.length}`);
+const local = await db.prepare("SELECT email FROM staff WHERE lower(email) LIKE '%@applywizz.local'").all();
+console.log(`\nActive staff now: ${left.n}. Remaining @applywizz.local fixtures (active or retired): ${local.length}`);

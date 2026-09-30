@@ -19,7 +19,7 @@
    are moved here too, the rest simply retire their fixture.
    ===================================================================== */
 import { migrate, BACKEND } from '../db/index.js';
-import { purgeLocalStaff } from '../connector/staff-purge.js';
+import { purgeLocalStaff, removeDeadFixtures } from '../connector/staff-purge.js';
 import { buildAwlCaIndex, normalizeAwlId, isConfigured as connectorConfigured } from '../connector/applicant-db.js';
 
 const APPLY = process.argv.includes('--apply');
@@ -40,13 +40,22 @@ console.log(`kept @applywizz staff: ${report.kept}   doomed fixtures: ${report.d
 if (!APPLY) {
   for (const p of report.projection) console.log(`  would-${p.fate.padEnd(6)} ${p.role.toUpperCase().padEnd(4)} ${p.email}`);
   if (report.doomed) console.log(`\nRe-run with --apply to ${report.wouldDelete} delete / ${report.wouldRetire} retire.`);
+  const preview = await removeDeadFixtures({ dryRun: true, actor: 'cli' });
+  for (const w of preview.wouldRemove) console.log(`  would-REMOVED ${w.role.toUpperCase().padEnd(4)} ${w.email}  (detaching ${w.detached.applications} app(s), ${w.detached.applicants} applicant(s))`);
   process.exit(0);
 }
 
 for (const d of report.deleted) console.log(`  DELETED  ${d.role.toUpperCase().padEnd(4)} ${d.email}`);
 for (const r of report.retired) console.log(`  RETIRED  ${r.role.toUpperCase().padEnd(4)} ${r.email}${r.refs ? `  (still owns ${r.refs.applicants} applicant(s), ${r.refs.applications} app(s))` : ''}`);
-console.log(`\npurged: ${report.deleted.length} deleted, ${report.retired.length} retired, ${report.reassignable} applicant(s) re-pointed to their real CA.`);
 
-// Prove the invariant: nothing left in the directory is a non-applywizz active
+// Retire is only a holding pattern for a never-real fixture. Now detach the
+// leftover references (nullable FK columns) and DELETE the lingering
+// @applywizz.local rows so they vanish from the staff table entirely.
+const gone = await removeDeadFixtures({ dryRun: false, actor: 'cli' });
+for (const g of gone.removed) console.log(`  REMOVED  ${g.role.toUpperCase().padEnd(4)} ${g.email}  (detached ${g.detached.applications} app(s), ${g.detached.applicants} applicant(s))`);
+console.log(`\npurged: ${report.deleted.length} deleted, ${report.retired.length} retired, ${report.reassignable} applicant(s) re-pointed to their real CA.`
+  + ` Fully removed dead fixtures: ${gone.removed.length}.`);
+
+// Prove the invariant: nothing left in the directory is a non-@applywizz active
 // fixture (retired rows may remain only where history legitimately pins them).
 process.exit(0);

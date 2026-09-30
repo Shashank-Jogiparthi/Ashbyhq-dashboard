@@ -197,3 +197,48 @@ CREATE TABLE IF NOT EXISTS link_scan_jobs (
   UNIQUE(url)
 );
 CREATE INDEX IF NOT EXISTS idx_scan_jobs_due ON link_scan_jobs(status, next_attempt_at);
+
+-- ---------------------------------------------------------------------
+-- v3.7 CA WORK-HISTORY + ca_data
+-- ca_data: the AWL-ID -> CA -> OM(CAM) map built from the CRM's
+-- clients_additional_info (career_associate_id / career_associate_manager_id).
+-- ca_email is resolved by staff.ext_id first, then the external /api/ca/emails
+-- id->email bridge; a CRM id with no match anywhere keeps ca_email NULL and is
+-- surfaced unresolved (never invented). FKs nullable, no ON DELETE (detach-safe).
+CREATE TABLE IF NOT EXISTS ca_data (
+  awl_id             TEXT PRIMARY KEY,
+  ca_id              TEXT REFERENCES staff(uuid),
+  ca_email           TEXT,
+  ca_ext_id          TEXT,
+  om_id              TEXT REFERENCES staff(uuid),
+  om_email           TEXT,
+  om_ext_id          TEXT,
+  source_updated_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ca_data_ca ON ca_data(ca_id);
+CREATE INDEX IF NOT EXISTS idx_ca_data_om ON ca_data(om_id);
+
+-- ca_work_history: cache of the external work-history API
+-- (.../api/ca/work-history?from&to&ca_email), one row per record. Keyed
+-- (work_date, awl_id, ca_email) so a re-pull upserts instead of duplicating.
+CREATE TABLE IF NOT EXISTS ca_work_history (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_date        TEXT NOT NULL,
+  awl_id           TEXT NOT NULL,
+  ca_email         TEXT NOT NULL,
+  ca_id            TEXT REFERENCES staff(uuid),
+  om_id            TEXT REFERENCES staff(uuid),
+  client_name      TEXT,
+  client_email     TEXT,
+  jobs_applied     INTEGER,
+  emails_submitted INTEGER,
+  emails_required  INTEGER,
+  status           TEXT,
+  start_time       TEXT,
+  end_time         TEXT,
+  source           TEXT,
+  fetched_at       TEXT NOT NULL,
+  UNIQUE (work_date, awl_id, ca_email)
+);
+CREATE INDEX IF NOT EXISTS idx_cwh_ca_date ON ca_work_history(ca_id, work_date);
+CREATE INDEX IF NOT EXISTS idx_cwh_date ON ca_work_history(work_date);

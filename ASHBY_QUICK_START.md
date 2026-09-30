@@ -410,14 +410,19 @@ has to open the URL to learn why there is nothing to fill.
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 193 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 223 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits
                       # + record-backed identity fields (phone) with no GenAI, the
                       # URL-placeholder guard, the model-free resume fallback and the
-                      # hung-run watchdog, the fixture purge (delete vs retire) and
-                      # the sign-up role gate (CA/OM/DEV only, never ADMIN)
+                      # hung-run watchdog, the fixture purge (delete vs retire), the
+                      # sign-up role gate (CA/OM/DEV only, never ADMIN), the dead
+                      # @applywizz.local domain (fully removed + refused as invalid
+                      # mail) and the CA work-history (dynamic DEV/ADMIN-only external
+                      # APIs with no hardcoded host, the ca_data AWL->CA->OM bridge,
+                      # visibility-only assignment that never auto-queues, and the
+                      # cached work-history span + per-link detail fallback)
 ```
 
 ---

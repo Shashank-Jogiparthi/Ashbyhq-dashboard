@@ -35,11 +35,28 @@ import { normalizeEmail, getStaff, logEvent } from '../db/store.js';
 // (applywizz.local, a stray gmail, a hand-typed address) is fixture noise.
 const KEEP_DOMAINS = new Set(['applywizz.com', 'applywizz.ai']);
 
+// The @applywizz.local domain was only ever the platform's sign-in FIXTURE
+// domain - no real person lives there and every row on it is retired by the
+// purge. It is now permanently DEAD: those addresses can never sign in or sign
+// up again (see isForbiddenLoginEmail, enforced at the auth endpoints), and any
+// fixture that still lingers - retired but FK-pinned by SUCCESS history - is
+// removed outright by removeDeadFixtures() once its references are detached.
+export const DEAD_FIXTURE_DOMAIN = 'applywizz.local';
+
 export function isApplywizzEmail(email) {
   const e = normalizeEmail(email);
   const at = e.lastIndexOf('@');
   if (at < 0) return false;
   return KEEP_DOMAINS.has(e.slice(at + 1));
+}
+
+// True for the dead fixture domain only. It names the exact domain, not a
+// suffix, so a hand-typed evil.local / @applywizz.localish address is NOT
+// matched, while rakesh@applywizz.local / priya.cam@applywizz.local always are.
+export function isForbiddenLoginEmail(email) {
+  const e = normalizeEmail(email);
+  const at = e.lastIndexOf('@');
+  return at >= 0 && e.slice(at + 1) === DEAD_FIXTURE_DOMAIN;
 }
 
 // Placeholder list for `IN (?, ?, ...)`, backend-agnostic (db rewrites for pg).
@@ -193,5 +210,66 @@ export async function purgeLocalStaff({ resolveApplicant = null, dryRun = false,
     dryRun: false, kept: report.kept, doomed: report.doomed,
     reassigned: report.reassignable, deleted: report.deleted.length, retired: report.retired.length
   });
+  return report;
+}
+
+/**
+ * Finish the job the standard purge only retires. purgeLocalStaff() keeps a
+ * doomed row alive (active=0) when SUCCESS history still references it, so the
+ * foreign key cannot break. That is right for a real person who is leaving, but
+ * the @applywizz.local fixtures were never real - a retired phantom still
+ * shows up in the staff table. removeDeadFixtures() deletes them outright by
+ * DETACHING every reference first (applications.ca_id/manager_id,
+ * applicants.ca_id/ops_id, staff.manager_id are all nullable), then removing
+ * the staff row + its session/otp.
+ *
+ * It only ever touches the DEAD_FIXTURE_DOMAIN, so a real @applywizz.com/.ai
+ * staff row (ADMINs included) can NEVER be hit - even if it is named in
+ * `emails`. Idempotent: run it again and there is nothing left to remove.
+ *
+ * @param {Object}   opts
+ * @param {string[]} [opts.emails]  restrict to these emails (still only those
+ *        on the dead domain). Omit it to sweep every lingering fixture.
+ * @param {boolean}  [opts.dryRun]  report what would go, change nothing.
+ * @param {string}   [opts.actor]   event attribution.
+ * @returns { dryRun, wouldRemove:[], removed:[] }  each entry carries the
+ *          `detached` reference counts it cleared before deleting.
+ */
+export async function removeDeadFixtures({ emails = null, dryRun = false, actor = 'system' } = {}) {
+  const staff = await db.prepare('SELECT * FROM staff').all();
+  let targets = staff.filter((s) => isForbiddenLoginEmail(s.email));
+  if (Array.isArray(emails)) {
+    const want = new Set(emails.map(normalizeEmail));
+    targets = targets.filter((s) => want.has(normalizeEmail(s.email)));
+  }
+  const report = { dryRun, wouldRemove: [], removed: [] };
+  if (!targets.length) return report;
+
+  if (dryRun) {
+    for (const s of targets) {
+      report.wouldRemove.push({ uuid: s.uuid, email: s.email, role: s.role, detached: await countRefs(db, s.uuid) });
+    }
+    return report;
+  }
+
+  await db.tx(async (t) => {
+    for (const s of targets) {
+      const detached = await countRefs(t, s.uuid);
+      // Detach every foreign key that still points at this fixture BEFORE the
+      // delete. ca_id and manager_id are cleared SEPARATELY (WHERE col = ?), so
+      // a row whose OTHER owner is a real survivor keeps that surviving owner.
+      await t.prepare('UPDATE applications SET ca_id = NULL WHERE ca_id = ?').run(s.uuid);
+      await t.prepare('UPDATE applications SET manager_id = NULL WHERE manager_id = ?').run(s.uuid);
+      await t.prepare('UPDATE applicants SET ca_id = NULL WHERE ca_id = ?').run(s.uuid);
+      await t.prepare('UPDATE applicants SET ops_id = NULL WHERE ops_id = ?').run(s.uuid);
+      await t.prepare('UPDATE staff SET manager_id = NULL WHERE manager_id = ?').run(s.uuid);
+      await t.prepare('DELETE FROM sessions WHERE staff_uuid = ?').run(s.uuid);
+      await t.prepare('DELETE FROM otp_codes WHERE email = ?').run(normalizeEmail(s.email));
+      await t.prepare('DELETE FROM staff WHERE uuid = ?').run(s.uuid);
+      report.removed.push({ uuid: s.uuid, email: s.email, role: s.role, detached });
+    }
+  });
+
+  await logEvent(null, 'fixtures_removed', actor, { removed: report.removed.map((r) => r.email) });
   return report;
 }

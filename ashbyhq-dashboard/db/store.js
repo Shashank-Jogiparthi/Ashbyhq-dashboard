@@ -1166,7 +1166,7 @@ export async function reopenForMissingFields(id, reason) {
 // New (AWL-ID -> link) pair from the connector; materialises immediately only
 // if the applicant already has an attached CA. The URL is canonicalised first so
 // one posting is one row however many tracking variants arrive (?source=, ?src=).
-export async function upsertApplicantJoblink(awlId, { url, company = '', title = '' }) {
+export async function upsertApplicantJoblink(awlId, { url, company = '', title = '', materialize = true }) {
   const link = canonicalJobUrl(url);
   if (!link) return { materialized: false };
   const existing = await db.prepare(
@@ -1176,7 +1176,11 @@ export async function upsertApplicantJoblink(awlId, { url, company = '', title =
   await db.prepare('INSERT INTO applicant_joblinks (awl_id, url, company, title, materialized, added_at) VALUES (?, ?, ?, ?, 0, ?)')
     .run(awlId, link, company, title, nowIso());
   const applicant = await db.prepare('SELECT ca_id FROM applicants WHERE awl_id = ?').get(awlId);
-  if (applicant?.ca_id) {
+  // Visibility-only refresh (materialize = false) stores the link as pending
+  // (materialized = 0) WITHOUT creating job_links/applications, so a bulk
+  // ca_data re-point can never flood a CA's queue even though their applicant
+  // row already carries a ca_id. The CA/CSV assign path materialises later.
+  if (applicant?.ca_id && materialize) {
     const ca = await getStaff(applicant.ca_id);
     await materializeJoblinks(awlId, applicant.ca_id, ca?.manager_id || null);
     return { materialized: true };
@@ -1193,7 +1197,7 @@ export async function upsertApplicantJoblink(awlId, { url, company = '', title =
 // "AWL-ID + joblink" flow start working with no manual assign step). An
 // unresolved tree leaves the existing attachment untouched rather than clearing
 // it, so a partial CRM read can never orphan live work.
-export async function upsertExternalApplicant({ awlId, fullName, email, phone, resumeAddress, profileJson, extId, opsId, caId }) {
+export async function upsertExternalApplicant({ awlId, fullName, email, phone, resumeAddress, profileJson, extId, opsId, caId, materialize = true }) {
   if (!awlId) throw new HttpError(400, 'Applicant is missing an AWL-ID');
   const existing = await db.prepare('SELECT * FROM applicants WHERE awl_id = ?').get(awlId);
   if (existing) {
@@ -1220,9 +1224,13 @@ export async function upsertExternalApplicant({ awlId, fullName, email, phone, r
         await db.prepare(`UPDATE applications SET ca_id = ?, manager_id = ?, updated_at = ?
           WHERE awl_id = ? AND status <> 'SUCCESS'`).run(newCa, mgr, nowIso(), awlId);
       }
-      // Idempotent: only touches materialized = 0 links, so a re-point of an
-      // already-materialised applicant creates no duplicate application.
-      await materializeJoblinks(awlId, newCa, mgr);
+      // Visibility-only refresh (materialize = false): point the applicant at
+      // its real CA/OM and leave the job links pending (materialized = 0) so the
+      // CA can SEE their book, but no application is auto-queued and no scan
+      // backlog forms. The CA/CSV assign path is what later materialises links.
+      if (newCa && materialize) {
+        await materializeJoblinks(awlId, newCa, mgr);
+      }
     }
     return { created: false, assigned: justAssigned, applicant };
   }
@@ -1398,7 +1406,7 @@ export async function devResolvePending(id, actor, outcome) {
 }
 
 export async function readTable(name, limit = 200) {
-  const allowed = ['staff', 'ams', 'job_links', 'applicants', 'applicant_joblinks', 'applications', 'application_events', 'sessions', 'system_state', 'job_link_fields', 'applicant_field_answers', 'automation_runs', 'link_scan_jobs'];
+  const allowed = ['staff', 'ams', 'job_links', 'applicants', 'applicant_joblinks', 'applications', 'application_events', 'sessions', 'system_state', 'job_link_fields', 'applicant_field_answers', 'automation_runs', 'link_scan_jobs', 'ca_data', 'ca_work_history'];
   if (!allowed.includes(name)) throw new HttpError(400, 'Table not inspectable');
   return db.prepare(`SELECT * FROM ${name} LIMIT ?`).all(limit);
 }
@@ -1412,4 +1420,107 @@ export async function setSystemState(key, value) {
   await db.prepare(`INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, ?)
               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
     .run(key, String(value), nowIso());
+}
+
+/* ------------------------------------------------------------------ */
+/* CA WORK-HISTORY + ca_data (v3.7)                                    */
+/* ------------------------------------------------------------------ */
+
+// One AWL -> CA -> OM(CAM) row, keyed by awl_id so a refresh updates in place.
+export async function upsertCaData({ awlId, caId = null, caEmail = null, caExtId = null, omId = null, omEmail = null, omExtId = null }) {
+  await db.prepare(`INSERT INTO ca_data
+      (awl_id, ca_id, ca_email, ca_ext_id, om_id, om_email, om_ext_id, source_updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(awl_id) DO UPDATE SET
+        ca_id = excluded.ca_id, ca_email = excluded.ca_email, ca_ext_id = excluded.ca_ext_id,
+        om_id = excluded.om_id, om_email = excluded.om_email, om_ext_id = excluded.om_ext_id,
+        source_updated_at = excluded.source_updated_at`)
+    .run(awlId, caId, caEmail, caExtId, omId, omEmail, omExtId, nowIso());
+}
+
+// Directory-health snapshot for the DEV pane.
+export async function caDataStats() {
+  const rows = await db.prepare('SELECT ca_id, ca_ext_id, om_id FROM ca_data').all();
+  return {
+    awls: rows.length,
+    resolvedCa: rows.filter((r) => r.ca_id).length,
+    unresolvedCa: rows.filter((r) => !r.ca_id && r.ca_ext_id).length,
+    resolvedOm: rows.filter((r) => r.om_id).length,
+  };
+}
+
+// A cached work-history API record, upserted on its natural key.
+export async function upsertCaWorkHistory(rec) {
+  await db.prepare(`INSERT INTO ca_work_history
+      (work_date, awl_id, ca_email, ca_id, om_id, client_name, client_email,
+       jobs_applied, emails_submitted, emails_required, status, start_time, end_time, source, fetched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(work_date, awl_id, ca_email) DO UPDATE SET
+        ca_id = excluded.ca_id, om_id = excluded.om_id,
+        client_name = excluded.client_name, client_email = excluded.client_email,
+        jobs_applied = excluded.jobs_applied, emails_submitted = excluded.emails_submitted,
+        emails_required = excluded.emails_required, status = excluded.status,
+        start_time = excluded.start_time, end_time = excluded.end_time,
+        source = excluded.source, fetched_at = excluded.fetched_at`)
+    .run(rec.workDate, rec.awlId, rec.caEmail, rec.caId ?? null, rec.omId ?? null,
+      rec.clientName ?? null, rec.clientEmail ?? null, rec.jobsApplied ?? null,
+      rec.emailsSubmitted ?? null, rec.emailsRequired ?? null, rec.status ?? null,
+      rec.startTime ?? null, rec.endTime ?? null, rec.source ?? null, nowIso());
+}
+
+// Per-CA capacity over an inclusive [from, to] day span (ISO YYYY-MM-DD strings).
+export async function getCaWorkHistory(caUuids, from, to) {
+  if (!caUuids || !caUuids.length) return [];
+  const ph = caUuids.map(() => '?').join(',');
+  const rows = await db.prepare(
+    `SELECT ca_id, awl_id, status, jobs_applied FROM ca_work_history
+      WHERE ca_id IN (${ph}) AND work_date >= ? AND work_date <= ?`
+  ).all(...caUuids, from, to);
+  const byCa = new Map();
+  for (const r of rows) {
+    let agg = byCa.get(r.ca_id);
+    if (!agg) { agg = { caId: r.ca_id, awls: new Set(), jobsApplied: 0, byStatus: {} }; byCa.set(r.ca_id, agg); }
+    agg.awls.add(r.awl_id);
+    agg.jobsApplied += Number(r.jobs_applied || 0);
+    const st = r.status || 'UNKNOWN';
+    agg.byStatus[st] = (agg.byStatus[st] || 0) + 1;
+  }
+  return [...byCa.values()].map((a) => ({
+    caId: a.caId, awls: a.awls.size, jobsApplied: a.jobsApplied, byStatus: a.byStatus,
+  }));
+}
+
+// A CA's AWL stack in the span, with any locally-applied links attached.
+export async function getCaWorkHistoryDetail(caUuid, from, to) {
+  const rows = await db.prepare(
+    `SELECT * FROM ca_work_history
+      WHERE ca_id = ? AND work_date >= ? AND work_date <= ?
+      ORDER BY awl_id, work_date`
+  ).all(caUuid, from, to);
+  const local = await db.prepare(
+    `SELECT a.id, a.awl_id, a.status, a.link_id, jl.url, jl.company, jl.title
+       FROM applications a LEFT JOIN job_links jl ON jl.id = a.link_id
+      WHERE a.ca_id = ?`
+  ).all(caUuid);
+  const appsByAwl = new Map();
+  for (const a of local) {
+    if (!appsByAwl.has(a.awl_id)) appsByAwl.set(a.awl_id, []);
+    appsByAwl.get(a.awl_id).push({
+      applicationId: a.id, status: a.status, url: a.url, company: a.company, title: a.title,
+    });
+  }
+  const byAwl = new Map();
+  for (const r of rows) {
+    let g = byAwl.get(r.awl_id);
+    if (!g) {
+      g = { awl_id: r.awl_id, clientName: r.client_name, clientEmail: r.client_email,
+        jobsApplied: 0, records: [], localApps: appsByAwl.get(r.awl_id) || [] };
+      byAwl.set(r.awl_id, g);
+    }
+    g.jobsApplied += Number(r.jobs_applied || 0);
+    g.records.push({ workDate: r.work_date, status: r.status, jobsApplied: r.jobs_applied,
+      emailsSubmitted: r.emails_submitted, emailsRequired: r.emails_required,
+      startTime: r.start_time, endTime: r.end_time, source: r.source });
+  }
+  return [...byAwl.values()];
 }

@@ -59,6 +59,7 @@ const ROLE_TABS = {
     { id: 'overview', label: 'Overview' },
     { id: 'assignments', label: 'Assignments' },
     { id: 'caview', label: 'CA Overview' },
+    { id: 'workhistory', label: 'Work History' },
     { id: 'applicants', label: 'Applicants' },
     { id: 'links', label: 'Job Links' },
     { id: 'applications', label: 'Applications' },
@@ -72,6 +73,7 @@ const ROLE_TABS = {
     { id: 'applications', label: 'Applications' },
     { id: 'staff', label: 'Staff' },
     { id: 'people', label: 'People' },
+    { id: 'workhistory', label: 'Work History' },
     { id: 'events', label: 'Events' },
     { id: 'tables', label: 'Raw Tables' }
   ],
@@ -85,6 +87,7 @@ const ROLE_TABS = {
     { id: 'applications', label: 'Applications' },
     { id: 'staff', label: 'Staff & Members' },
     { id: 'people', label: 'People' },
+    { id: 'workhistory', label: 'Work History' },
     { id: 'events', label: 'Events' },
     { id: 'tables', label: 'Raw Tables' }
   ]
@@ -96,6 +99,7 @@ const RENDERERS = {
   overview: renderOpsOverview,
   assignments: renderOpsAssignments,
   caview: renderOpsCaView,
+  workhistory: renderWorkHistory,
   people: renderDevPeople,
   links: renderOpsLinks,
   applications: renderApplicationsTable,
@@ -796,6 +800,137 @@ async function renderCaSummaryInto(pane, caUuid) {
       if (list) { list.innerHTML = appsHtml(awl); list.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
     });
   });
+}
+
+/* ---------------- Work History (OM + DEV/ADMIN, v3.7) ---------------- */
+// A day-span view of CA capacity read from the cached external work-history,
+// plus (DEV/ADMIN only) the dynamic External-API settings and the on-demand
+// refresh. Numbers come from ca_work_history; the innermost detail reuses the
+// existing per-CA summary (screenshots / answers).
+
+function externalApisCard(cfg) {
+  return `<div class="card" style="margin-bottom:14px;">
+    <b>External APIs</b> <span class="chip role-dev">DEV/ADMIN</span>
+    <p class="muted">Dynamic settings stored in the database - nothing is hardcoded or lives in <span class="mono">.env</span>. Connectors re-read them at call time, so a save takes effect with no redeploy. Leave the CA-management base blank to run cache-only.</p>
+    <label class="muted small">CA-management base (required: <span class="mono">/api/ca/emails</span> + <span class="mono">/api/ca/work-history</span>)<br>
+      <input id="ext-ca-base" style="width:100%;" placeholder="https://your-ca-mgmt-host" value="${esc(cfg.caMgmtBase || '')}" /></label>
+    <label class="muted small">ApplyWizz base (optional: <span class="mono">/api/get-client-details</span>)<br>
+      <input id="ext-awz-base" style="width:100%;" placeholder="https://your-applywizz-host" value="${esc(cfg.applywizzBase || '')}" /></label>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;">
+      <label class="muted small" style="flex:1;">Auth header (optional)<input id="ext-auth-header" style="width:100%;" value="${esc(cfg.authHeader || '')}" /></label>
+      <label class="muted small" style="flex:1;">Auth value<input id="ext-auth-value" style="width:100%;" value="${esc(cfg.authValue || '')}" /></label>
+    </div>
+    <div class="actions" style="margin-top:10px;">
+      <button class="primary" id="ext-save">Save</button>
+      <button id="ext-test-emails">Test CA emails</button>
+      <button id="ext-test-wh">Test work-history</button>
+    </div>
+    <div id="ext-out" class="muted" style="margin-top:8px;"></div>
+  </div>`;
+}
+
+function wireExternalApis() {
+  $('ext-save').addEventListener('click', async () => {
+    $('ext-out').textContent = 'Saving...';
+    try {
+      await api('/api/dev/settings/apis', { method: 'POST', body: JSON.stringify({
+        caMgmtBase: $('ext-ca-base').value, applywizzBase: $('ext-awz-base').value,
+        authHeader: $('ext-auth-header').value, authValue: $('ext-auth-value').value
+      }) });
+      $('ext-out').textContent = 'Saved.'; toast('External API settings saved.');
+    } catch (err) { $('ext-out').textContent = ''; toast(err.message, true); }
+  });
+  $('ext-test-emails').addEventListener('click', async () => {
+    $('ext-out').textContent = 'Testing CA emails...';
+    try {
+      const r = await api('/api/dev/settings/apis/test', { method: 'POST', body: JSON.stringify({ which: 'ca_emails' }) });
+      $('ext-out').textContent = r.ok ? `CA emails OK - ${r.sample_count} active CAs.` : `CA emails: ${esc(r.skipped || r.error || 'failed')}`;
+    } catch (err) { $('ext-out').textContent = esc(err.message); }
+  });
+  $('ext-test-wh').addEventListener('click', async () => {
+    $('ext-out').textContent = 'Testing work-history...';
+    try {
+      const r = await api('/api/dev/settings/apis/test', { method: 'POST', body: JSON.stringify({ which: 'work_history', from: $('wh-from').value, to: $('wh-to').value }) });
+      $('ext-out').textContent = r.ok ? `Work-history OK - ${r.sample_count} record(s) (total ${r.total}).` : `Work-history: ${esc(r.skipped || r.error || 'failed')}`;
+    } catch (err) { $('ext-out').textContent = esc(err.message); }
+  });
+}
+
+async function loadWorkHistoryList() {
+  const from = $('wh-from').value, to = $('wh-to').value;
+  $('wh-detail').innerHTML = '';
+  $('wh-list').innerHTML = '<p class="muted">Loading...</p>';
+  try {
+    const d = await api(`/api/work-history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+    const rows = d.cas.map((c) => [
+      `<b>${esc(c.ca.name || c.ca.uuid)}</b><br><span class="muted mono small">${esc(c.ca.email || '')}</span>`,
+      c.awls, c.jobsApplied,
+      Object.entries(c.byStatus || {}).map(([k, v]) => `${esc(k)}:${v}`).join(' - ') || '—',
+      `<button class="primary" data-wh-logs="${esc(c.ca.uuid)}">View Logs</button>`
+    ]);
+    $('wh-list').innerHTML = `<div class="card"><h3>CAs active ${esc(from)} → ${esc(to)} (${d.cas.length})</h3>` +
+      tableHtml(['CA', 'Clients (AWLs)', 'Jobs applied', 'By status', ''], rows) + '</div>';
+    $('wh-list').querySelectorAll('[data-wh-logs]').forEach((b) => b.addEventListener('click', () => openWhLogs(b.dataset.whLogs, from, to)));
+  } catch (err) { $('wh-list').innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
+}
+
+async function openWhLogs(caUuid, from, to) {
+  $('wh-detail').innerHTML = '<p class="muted">Loading logs...</p>';
+  try {
+    const d = await api(`/api/work-history/ca/${caUuid}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+    const cards = d.awls.map((a) => `
+      <div class="card queue-card">
+        <div class="head"><b class="mono">${esc(a.awl_id)}</b> — ${esc(a.clientName || '—')} ${a.localApps && a.localApps.length ? `<span class="chip SUCCESS">${a.localApps.length} applied here</span>` : ''}</div>
+        <div class="muted small">jobs applied (API): <b>${a.jobsApplied}</b>${a.clientEmail ? ` · <span class="mono">${esc(a.clientEmail)}</span>` : ''}</div>
+        ${(a.records || []).map((r) => `<div class="muted small mono">${esc(r.workDate)} · ${esc(r.status || '')} · ${r.jobsApplied ?? 0} jobs · ${esc(r.source || '')}</div>`).join('')}
+        ${(a.localApps || []).map((la) => `<div class="muted small">→ <a href="${esc(la.url)}" target="_blank" rel="noopener">${esc(la.company || '')} — ${esc(la.title || '')}</a> ${chip(la.status)}</div>`).join('')}
+      </div>`).join('');
+    $('wh-detail').innerHTML = `<div class="card"><h3>${esc((d.ca && d.ca.name) || 'CA')} — AWL stack ${esc(from)} → ${esc(to)}</h3>
+      ${cards || '<p class="muted">No cached work-history for this CA in the span.</p>'}
+      <div class="actions"><button class="primary" id="wh-full-log">Open full CA log (screenshots / answers)</button></div>
+      <div id="wh-full-pane"></div></div>`;
+    $('wh-full-log').addEventListener('click', () => renderCaSummaryInto($('wh-full-pane'), caUuid));
+  } catch (err) { $('wh-detail').innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
+}
+
+async function renderWorkHistory() {
+  const isDev = ME.role === 'dev' || ME.role === 'admin';
+  let cfg = { caMgmtBase: '', applywizzBase: '', authHeader: '', authValue: '' };
+  if (isDev) { try { cfg = await api('/api/dev/settings/apis'); } catch { /* defaults */ } }
+  const today = new Date().toISOString().slice(0, 10);
+
+  $('view').innerHTML = `
+    ${isDev ? externalApisCard(cfg) : ''}
+    <div class="card" style="margin-bottom:14px;">
+      <b>CA work-history</b>
+      <p class="muted">Pick a day span. ${isDev ? 'DEV/ADMIN can refresh the cached activity from the external work-history API (this also rebuilds <span class="mono">ca_data</span> and points applicants at their real CA/OM for visibility only - it never auto-queues an application).' : 'A CA appears here if they have cached work-history in the span.'}</p>
+      <div class="actions" style="align-items:center;flex-wrap:wrap;gap:10px;">
+        <label class="muted small">From <input type="date" id="wh-from" value="${today}" /></label>
+        <label class="muted small">To <input type="date" id="wh-to" value="${today}" /></label>
+        <button class="primary" id="wh-load">Load</button>
+        ${isDev ? '<button class="green" id="wh-refresh">Refresh ca_data + work-history</button>' : ''}
+      </div>
+      <div id="wh-refresh-out" class="muted" style="margin-top:8px;"></div>
+    </div>
+    <div id="wh-list"></div>
+    <div id="wh-detail"></div>`;
+
+  if (isDev) wireExternalApis();
+  $('wh-load').addEventListener('click', () => loadWorkHistoryList());
+  if (isDev) $('wh-refresh').addEventListener('click', async () => {
+    const from = $('wh-from').value, to = $('wh-to').value;
+    $('wh-refresh-out').textContent = 'Refreshing...';
+    try {
+      const r = await api('/api/dev/ca-data/refresh', { method: 'POST', body: JSON.stringify({ from, to }) });
+      const cd = r.caData || {}, wh = r.workHistory || {};
+      $('wh-refresh-out').textContent =
+        `ca_data: ${cd.caDataWritten ?? cd.wouldWrite ?? 0} AWLs (created ${cd.applicantsCreated ?? 0}, pointed ${cd.applicantsPointed ?? 0}, unresolved CA ${cd.unresolvedCa ?? 0}) - ` +
+        (wh.skipped ? `work-history ${esc(wh.skipped)}` : `work-history ${wh.upserted ?? 0} rows / ${wh.cas ?? 0} CAs`);
+      toast('Refresh complete.');
+      loadWorkHistoryList();
+    } catch (err) { $('wh-refresh-out').textContent = ''; toast(err.message, true); }
+  });
+  await loadWorkHistoryList();
 }
 
 async function renderOpsCaView() {
