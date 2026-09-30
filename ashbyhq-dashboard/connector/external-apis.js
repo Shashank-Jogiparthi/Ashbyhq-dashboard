@@ -1,20 +1,22 @@
 /* =====================================================================
    External ApplyWizz read APIs (v3.7 CA work-history).
 
-   THREE public GET endpoints, none of whose hosts are hardcoded here:
+   THREE public GET endpoints, connected OUT OF THE BOX via built-in defaults:
      C  {ca_mgmt_base}/api/ca/emails            -> 59 active CAs {id,name,email,role}
                                                      (the career_associate_id -> email bridge)
      B  {ca_mgmt_base}/api/ca/work-history       -> per-CA day-span activity
         ?from&to&ca_email&page&pageSize
-     A  {applywizz_base}/api/get-client-details  -> optional per-AWL detail
+     A  {applywizz_base}/api/get-client-details  -> per-AWL applicant detail
         ?applywizz_id=
 
-   The base URLs (and an OPTIONAL auth header/value for a future keyed
-   endpoint) are DEV/ADMIN-managed DYNAMIC settings read from `system_state`
-   at CALL time, so a change in the DEV pane takes effect with no redeploy and
-   there is nothing to leak into source. If `ca_mgmt_base` is unset every call
-   degrades to { ok:false, skipped:'not_configured' } rather than throwing, so
-   the dashboard still serves whatever is already cached.
+   The base URLs ship as DEFAULT_EXT_API below so the feature works with zero
+   setup, but a DEV/ADMIN can OVERRIDE any of them at runtime from the DEV pane
+   (stored in `system_state`, re-read at CALL time, so a save takes effect with
+   no redeploy). Resolution rule: a key that was NEVER set falls back to the
+   default (connected); a stored value wins; an explicitly BLANK value forces
+   that feed cache-only (the { skipped:'not_configured' } degrade path). Nothing
+   lives in .env, and an optional auth header/value is available for a future
+   keyed endpoint without a code change.
 
    Every function accepts an optional { fetchImpl } so verify:flow can drive
    them with a fixture and never touch the network.
@@ -29,6 +31,13 @@ export const EXT_API_KEYS = {
   authValue: 'ext_api.auth_value',
 };
 
+// Built-in defaults so the endpoints are CONNECTED out of the box. A DEV/ADMIN
+// override in system_state wins; clearing a field to blank disables that feed.
+export const DEFAULT_EXT_API = {
+  caMgmtBase: 'https://applywizz-ca-management.vercel.app',
+  applywizzBase: 'https://www.apply-wizz.me',
+};
+
 // Short TTL so a DEV edit lands within a few seconds without a redeploy, but a
 // burst of calls (e.g. one work-history page per CA) doesn't re-read the DB.
 const TTL_MS = 15_000;
@@ -39,13 +48,17 @@ function strip(s) { return String(s || '').trim().replace(/\/+$/, ''); }
 /** Resolve the current dynamic settings (cached briefly). */
 export async function extApiSettings() {
   if (_cache.val && Date.now() - _cache.at < TTL_MS) return _cache.val;
-  const [caMgmtBase, applywizzBase, authHeader, authValue] = await Promise.all([
-    getSystemState(EXT_API_KEYS.caMgmtBase, ''),
-    getSystemState(EXT_API_KEYS.applywizzBase, ''),
+  const [ca, awz, authHeader, authValue] = await Promise.all([
+    getSystemState(EXT_API_KEYS.caMgmtBase, null),
+    getSystemState(EXT_API_KEYS.applywizzBase, null),
     getSystemState(EXT_API_KEYS.authHeader, ''),
     getSystemState(EXT_API_KEYS.authValue, ''),
   ]);
-  _cache = { at: Date.now(), val: { caMgmtBase: strip(caMgmtBase), applywizzBase: strip(applywizzBase), authHeader: String(authHeader || '').trim(), authValue: String(authValue || '').trim() } };
+  // null = never set -> built-in default (connected). A stored value (even a
+  // blank one) is an explicit DEV/ADMIN choice and wins, so blank => cache-only.
+  const caMgmtBase = ca === null ? DEFAULT_EXT_API.caMgmtBase : strip(ca);
+  const applywizzBase = awz === null ? DEFAULT_EXT_API.applywizzBase : strip(awz);
+  _cache = { at: Date.now(), val: { caMgmtBase, applywizzBase, authHeader: String(authHeader || '').trim(), authValue: String(authValue || '').trim() } };
   return _cache.val;
 }
 

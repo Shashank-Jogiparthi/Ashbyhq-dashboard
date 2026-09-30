@@ -13,6 +13,12 @@
       <div class="brand" id="dash-title">Dashboard</div>
     </div>
     <div class="spacer"></div>
+    <div id="wh-topbar" style="display:none;align-items:center;gap:8px;margin-right:10px;">
+      <label style="font-size:12px;font-weight:700;display:flex;align-items:center;gap:4px;">From<input type="date" id="wh-from" style="font-size:12px;padding:2px 4px;" /></label>
+      <label style="font-size:12px;font-weight:700;display:flex;align-items:center;gap:4px;">To<input type="date" id="wh-to" style="font-size:12px;padding:2px 4px;" /></label>
+      <button id="wh-load">Load</button>
+      <button id="wh-refresh" class="green" style="display:none;">Refresh work-history</button>
+    </div>
     <span class="chip" id="role-chip">—</span>
     <div class="card" style="padding:6px 12px;box-shadow:none;" id="who">—</div>
     <button id="btn-refresh">Refresh</button>

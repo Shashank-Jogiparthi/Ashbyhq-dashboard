@@ -1102,7 +1102,7 @@ async function verifyDeadFixtures() {
 
 /* ---- v3.7 step 10: CA work-history + ca_data + dynamic external APIs ---- */
 async function verifyCaWorkHistory() {
-  step('10. CA work-history: dynamic APIs (no hardcoding), ca_data bridge, visibility-only assign, cached history + fallback');
+  step('10. CA work-history: connected default APIs (DEV/ADMIN-overridable), ca_data bridge, visibility-only assign, cached history + fallback');
   const { buildCaData } = await import('../connector/ca-data.js');
   const { refreshWorkHistory } = await import('../connector/work-history.js');
   const {
@@ -1111,17 +1111,41 @@ async function verifyCaWorkHistory() {
   const extSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'connector', 'external-apis.js'), 'utf8');
   const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
 
-  // ---- A. No hardcoding + guard rules ----
+  // ---- A. Connected defaults + DEV/ADMIN override + guard rules ----
   const HOSTS = ['applywizz-ca-management.vercel.app', 'apply-wizz.me'];
   const hasHost = (s) => HOSTS.some((h) => s.includes(h));
-  check('external-apis.js hardcodes NO endpoint host (bases come from system_state)', !hasHost(extSrc));
-  check('server.js hardcodes NO endpoint host', !hasHost(serverSrc));
+  check('external-apis.js ships the two hosts as overridable DEFAULTS (connected out of the box)',
+    hasHost(extSrc) && /DEFAULT_EXT_API/.test(extSrc));
+  check('server.js hardcodes NO endpoint host (it reads the resolved settings)', !hasHost(serverSrc));
   check('the external-API settings write route is DEV/ADMIN-guarded',
     serverSrc.includes(`app.post('/api/dev/settings/apis', requireAuth, requireRole('dev', 'admin')`));
   const refreshIdx = serverSrc.indexOf(`'/api/dev/ca-data/refresh'`);
   const refreshBlock = refreshIdx >= 0 ? serverSrc.slice(refreshIdx, serverSrc.indexOf('}));', refreshIdx)) : '';
   check('the ca-data refresh route never queues scans (visibility only)',
     refreshIdx >= 0 && refreshBlock.length > 0 && !refreshBlock.includes('queueUnscannedLinks'));
+
+  // ---- A2. default vs override resolution (system_state wins; blank = cache-only) ----
+  const { extApiSettings, clearExtApiCache, EXT_API_KEYS } = await import('../connector/external-apis.js');
+  const { setSystemState } = await import('../db/store.js');
+  const WH_KEYS = [EXT_API_KEYS.caMgmtBase, EXT_API_KEYS.applywizzBase];
+  try {
+    await db.prepare('DELETE FROM system_state WHERE key IN (?, ?)').run(WH_KEYS[0], WH_KEYS[1]);
+    clearExtApiCache();
+    const def = await extApiSettings();
+    check('with no override saved, the built-in default bases are used (connected)',
+      def.caMgmtBase === 'https://applywizz-ca-management.vercel.app' && def.applywizzBase === 'https://www.apply-wizz.me');
+    await setSystemState(EXT_API_KEYS.caMgmtBase, 'https://override.example');
+    clearExtApiCache();
+    check('a DEV/ADMIN system_state override wins over the default',
+      (await extApiSettings()).caMgmtBase === 'https://override.example');
+    await setSystemState(EXT_API_KEYS.caMgmtBase, '   ');
+    clearExtApiCache();
+    check('clearing the field to blank forces cache-only (empty base)',
+      (await extApiSettings()).caMgmtBase === '');
+  } finally {
+    await db.prepare('DELETE FROM system_state WHERE key IN (?, ?)').run(WH_KEYS[0], WH_KEYS[1]);
+    clearExtApiCache();
+  }
 
   // ---- fixtures ----
   const BALAJI_EXT = '9dc9376e-fbc5-440b-932f-38da10b89a70';
