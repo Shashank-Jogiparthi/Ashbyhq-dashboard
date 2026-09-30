@@ -97,6 +97,7 @@ const ROLE_TABS = {
     { id: 'staff', label: 'Staff' },
     { id: 'people', label: 'People' },
     { id: 'workhistory', label: 'Work History' },
+    { id: 'assignhealth', label: 'Assignment health' },
     { id: 'events', label: 'Events' },
     { id: 'tables', label: 'Raw Tables' }
   ],
@@ -111,6 +112,7 @@ const ROLE_TABS = {
     { id: 'staff', label: 'Staff & Members' },
     { id: 'people', label: 'People' },
     { id: 'workhistory', label: 'Work History' },
+    { id: 'assignhealth', label: 'Assignment health' },
     { id: 'events', label: 'Events' },
     { id: 'tables', label: 'Raw Tables' }
   ]
@@ -123,6 +125,7 @@ const RENDERERS = {
   assignments: renderOpsAssignments,
   caview: renderOpsCaView,
   workhistory: renderWorkHistory,
+  assignhealth: renderAssignmentHealth,
   people: renderDevPeople,
   links: renderOpsLinks,
   applications: renderApplicationsTable,
@@ -1028,6 +1031,60 @@ async function renderOpsCaView() {
     .catch((err) => { $('ca-view-pane').innerHTML = `<div class="error-box">${esc(err.message)}</div>`; });
   $('ca-view-pick').addEventListener('change', load);
   load();
+}
+
+async function renderAssignmentHealth() {
+  const HINT = {
+    shell: '<span class="chip" style="background:#dc2626;color:#fff;">never synced</span>',
+    ca_not_rostered: '<span class="chip" style="background:#f59e0b;color:#fff;">CA not in roster</span>',
+    unassigned: '<span class="chip">unassigned</span>',
+    not_in_crm: '<span class="chip" style="background:#dc2626;color:#fff;">not in CRM</span>',
+    no_ca_in_crm: '<span class="chip" style="background:#f59e0b;color:#fff;">no CA in CRM</span>',
+    crm_not_configured: '<span class="chip">host has no CRM access</span>',
+  };
+  const chipFor = (k) => HINT[k] || chip(k);
+  $('view').innerHTML = '<p class="muted">Loading…</p>';
+
+  const resolve = async (awlId) => {
+    document.querySelectorAll('#view button').forEach((b) => { b.disabled = true; });
+    let r;
+    try { r = await api('/api/dev/assignment-health/resolve', { method: 'POST', body: JSON.stringify(awlId ? { awlId } : {}) }); }
+    catch (err) { toast(err.message, true); document.querySelectorAll('#view button').forEach((b) => { b.disabled = false; }); return; }
+    const ok = r.results.filter((x) => x.result === 'assigned');
+    const gaps = r.results.filter((x) => x.result === 'unassigned');
+    if (ok.length) toast(`Assigned ${ok.length}: ${ok.map((x) => `${x.awlId} → ${x.caName}`).join(', ')}`, false);
+    else toast(gaps.length ? 'No applicant could be assigned — the CRM has no CA for them (see reasons).' : 'Nothing to assign.', true);
+    await draw();
+  };
+
+  const draw = async () => {
+    const d = await api('/api/dev/assignment-health');
+    if (!d.count) {
+      $('view').innerHTML = '<div class="card"><h3>Assignment health</h3><p class="ok-box" style="color:#16a34a;">✓ Every applicant is assigned to a CA — nothing is invisible.</p></div>';
+      return;
+    }
+    const rows = d.unassigned.map((a) => [
+      `<b>${esc(a.awlId)}</b>`,
+      esc(a.fullName || ''),
+      a.pendingLinks ? `<span style="color:#dc2626;">${a.pendingLinks} pending</span>` : '<span class="muted">—</span>',
+      chipFor(a.hint),
+      `<button class="ghost" data-resolve="${esc(a.awlId)}">Re-resolve</button>`,
+    ]);
+    $('view').innerHTML = `
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <h3 style="margin:0;">${d.count} applicant(s) invisible to every CA</h3>
+          <button id="ah-all" class="primary" ${d.connector ? '' : 'disabled title="no CRM access on this host"'}>Re-resolve all from CRM</button>
+        </div>
+        <p class="muted" style="margin:8px 0;">These have no CA, so no CA/OM dashboard can show them${d.with_links ? ` — ${d.with_links} still carry pending job links` : ''}. Re-resolve pulls each from the CRM (the source of truth) and assigns it; anything the CRM cannot resolve stays flagged with its reason.</p>
+        ${d.connector ? '' : '<div class="error-box">This host cannot reach the CRM — run Re-resolve from a CRM-connected host.</div>'}
+        ${tableHtml(['AWL-ID', 'Name', 'Links', 'Why unassigned', ''], rows)}
+      </div>`;
+    $('ah-all').addEventListener('click', () => resolve(null));
+    document.querySelectorAll('[data-resolve]').forEach((b) => b.addEventListener('click', () => resolve(b.dataset.resolve)));
+  };
+
+  await draw();
 }
 
 async function renderDevPeople() {

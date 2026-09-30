@@ -410,7 +410,7 @@ has to open the URL to learn why there is nothing to fill.
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 232 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 244 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits
@@ -426,7 +426,10 @@ npm run verify:flow   # 232 assertions: gate per mode, defer/refund, hand-back +
                       # "CAs live today" view (source=live badge + jobs summary),
                       # an OM column + OM filter + a CA/AWL search, "View Logs"
                       # in a modal, and the cached work-history span + per-link
-                      # detail fallback)
+                      # detail fallback; and assignment health (no applicant can be
+                      # silently orphaned invisible to every CA - the DEV/ADMIN view
+                      # lists them with the CRM reason + a Re-resolve that repairs
+                      # from the CRM and never invents a CA)
 ```
 
 ---

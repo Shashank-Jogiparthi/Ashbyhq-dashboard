@@ -48,6 +48,7 @@ import {
   setSystemState,
   getCaWorkHistory,
   getCaWorkHistoryDetail,
+  listUnassignedApplicants,
   upsertExternalApplicant
 } from './db/store.js';
 import { sendAuthCode } from './core/mailer.js';
@@ -57,7 +58,7 @@ import { describeConnectorEnv } from './core/applicant-source.js';
 import * as worker from './worker/runner.js';
 import { enqueueLinkScans, scanQueueState, scanStateForUrl, start as startScanWorker } from './worker/link-scanner.js';
 import { checkBrowser } from './core/browser-check.js';
-import { syncFromPostgres, syncApplicantByAwl, ingestDocument, normalizeAwlId, isConfigured as connectorConfigured, buildStaffTree, buildAwlCaIndex } from './connector/applicant-db.js';
+import { syncFromPostgres, syncApplicantByAwl, ingestDocument, normalizeAwlId, isConfigured as connectorConfigured, buildStaffTree, buildAwlCaIndex, diagnoseAssignment } from './connector/applicant-db.js';
 import { staffDirectoryStats } from './connector/staff-directory.js';
 import { purgeLocalStaff, isForbiddenLoginEmail, removeDeadFixtures } from './connector/staff-purge.js';
 import { buildCaData, caDataStats } from './connector/ca-data.js';
@@ -907,8 +908,10 @@ app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async 
     if (seen.has(dedupe)) continue;
     seen.add(dedupe);
     let applicant = await getApplicantByAwlId(awlId);
-    if (!applicant && connectorConfigured()) {
-      // Unknown AWL: try to pull the applicant straight from the CRM first.
+    if (connectorConfigured() && (!applicant || !applicant.ca_id)) {
+      // Unknown AWL, or a previously-orphaned shell with no CA: pull it straight
+      // from the CRM so the CA mapping is applied instead of leaving the row
+      // invisible to every CA. Re-ingesting an AWL must be able to repair it.
       await syncApplicantByAwl(awlId).catch(() => {});
       applicant = await getApplicantByAwlId(awlId);
     }
@@ -941,6 +944,19 @@ app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async 
     });
   }
   await logEvent(null, 'links_ingested', 'dev', { awl_ids: [...new Set(accepted.map((a) => a.awlId))], accepted: accepted.length, rejected: rejected.length });
+  // Surface (never silently) any AWL that still has no CA after all of this: it
+  // is invisible to every CA dashboard, so the operator is told here and can fix
+  // it from DEV > Assignment health. The gap names the cause.
+  const unassigned = [];
+  for (const awlId of [...new Set(accepted.map((a) => a.awlId))]) {
+    const ap = await getApplicantByAwlId(awlId);
+    if (!ap || !ap.ca_id) {
+      const d = unassigned.length < 25
+        ? await diagnoseAssignment(awlId).catch(() => ({ gap: 'unknown' }))
+        : { gap: 'unknown' };
+      unassigned.push({ awlId, gap: d.gap || 'unknown' });
+    }
+  }
   // 4. pre-scan what has no questions yet — a durable background queue, one
   // browser at a time, so the paste returns immediately and the CA finds the
   // inventory (already answered as far as the applicant's data allows) waiting.
@@ -950,6 +966,7 @@ app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async 
   return {
     accepted: accepted.filter((a) => !a.error), rejected: [...rejected, ...failed],
     links: accepted.map((a) => a.url), profiles, scan,
+    unassigned,
     // Whether THIS host can read the CRM at all. False means every AWL-ID here
     // became a shell and no run on it can fetch a resume, so the UI has to say
     // that instead of promising a later sync.
@@ -959,6 +976,60 @@ app.post('/api/dev/links', requireAuth, requireRole('dev', 'admin'), wrap(async 
     placeholders: [...new Set(placeholders)],
     malformed: malformed.slice(0, 50), malformed_count: malformed.length
   };
+}));
+
+/* ------------------ assignment health (the invisible-applicant net) ------------------
+   An applicant whose ca_id is NULL is invisible to EVERY CA dashboard, yet the
+   ingest that created it reported "accepted". This is the systemic backstop: the
+   DEV view lists every such applicant, and the resolve action re-syncs each from
+   the CRM (the source of truth) and reports exactly why any still cannot be
+   assigned. It NEVER invents a CA or a staff row - an AWL the CRM does not know
+   stays flagged, it is not silently dropped or guessed. */
+app.get('/api/dev/assignment-health', requireAuth, requireRole('dev', 'admin'), wrap(async () => {
+  const rows = await listUnassignedApplicants();
+  return {
+    connector: connectorConfigured(),
+    count: rows.length,
+    with_links: rows.filter((a) => Number(a.pending_links) > 0).length,
+    unassigned: rows.map((a) => ({
+      awlId: a.awl_id, fullName: a.full_name, email: a.email,
+      pendingLinks: Number(a.pending_links) || 0,
+      // coarse hint from our own rows; the authoritative gap comes from resolve
+      hint: a.ext_id ? 'ca_not_rostered' : (a.full_name === a.awl_id ? 'shell' : 'unassigned'),
+    })),
+  };
+}));
+
+app.post('/api/dev/assignment-health/resolve', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => {
+  if (!connectorConfigured()) {
+    throw new HttpError(400, 'This host cannot reach the CRM, so assignment cannot be resolved here. Run it from a CRM-connected host.');
+  }
+  const only = normalizeAwlId(req.body?.awlId || '');
+  const targets = only ? [{ awl_id: only }] : await listUnassignedApplicants();
+  const results = [];
+  for (const row of targets) {
+    const awlId = row.awl_id;
+    if (!awlId) continue;
+    let outcome;
+    try {
+      await syncApplicantByAwl(awlId);                       // CRM is authoritative; repairs the shell
+      const ap = await getApplicantByAwlId(awlId);
+      if (ap?.ca_id) {
+        const ca = await getStaff(ap.ca_id);
+        outcome = { awlId, result: 'assigned', caId: ap.ca_id, caName: ca?.name || ca?.email || ap.ca_id };
+      } else {
+        const d = await diagnoseAssignment(awlId);           // why it still has no CA
+        outcome = { awlId, result: 'unassigned', gap: d.gap || 'unknown', caExtId: d.caExtId || null };
+      }
+    } catch (err) {
+      outcome = { awlId, result: 'error', error: String(err.message || err).slice(0, 200) };
+    }
+    results.push(outcome);
+    await logEvent(null, 'assignment_resolved', 'dev', { awl_id: awlId, ...outcome });
+  }
+  const assigned = results.filter((r) => r.result === 'assigned').length;
+  await logEvent(null, 'assignment_health_resolve', 'dev', { attempted: results.length, assigned });
+  return { attempted: results.length, assigned, results };
 }));
 
 // Explicit pre-scan control: queue specific links (by url or job_links.id), or

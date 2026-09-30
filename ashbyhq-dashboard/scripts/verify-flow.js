@@ -1285,6 +1285,61 @@ async function verifyCaWorkHistory() {
   }
 }
 
+async function verifyAssignmentHealth() {
+  step('11. Assignment health: no applicant can be silently orphaned (invisible to every CA)');
+  const { listUnassignedApplicants, upsertExternalApplicant, upsertApplicantJoblink } = await import('../db/store.js');
+  const { assignmentGapReason } = await import('../connector/applicant-db.js');
+  const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
+  const appSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'app.js'), 'utf8');
+
+  // ---- the gap classifier is exhaustive and never guesses a CA ----
+  check('assignmentGapReason: an AWL absent from the CRM is "not_in_crm"',
+    assignmentGapReason({ inCrm: false }) === 'not_in_crm');
+  check('assignmentGapReason: a CRM row with no career_associate_id is "no_ca_in_crm"',
+    assignmentGapReason({ inCrm: true, caExtId: '', caId: null }) === 'no_ca_in_crm');
+  check('assignmentGapReason: a CRM CA id that is not rostered is "ca_not_rostered"',
+    assignmentGapReason({ inCrm: true, caExtId: 'x', caId: null }) === 'ca_not_rostered');
+  check('assignmentGapReason: a CRM row that resolves to a rostered CA is "assigned"',
+    assignmentGapReason({ inCrm: true, caExtId: 'x', caId: 'y' }) === 'assigned');
+
+  // ---- listUnassignedApplicants finds the orphan a silent shell leaves behind ----
+  const AWL_ORPH = 'AWL-VERIFY-ORPH';
+  const AH_CA_UUID = 'verify-ah-ca';
+  const URL_ORPH = 'https://jobs.ashbyhq.com/verify/5d5d5d5d-5d5d-4d5d-8d5d-5d5d5d5d5d5d';
+  try {
+    await db.prepare(`INSERT INTO staff (uuid, email, name, role, applicant_quota, active, created_at)
+      VALUES (?, 'verify-ah-ca@applywizz.ai', 'AH CA', 'ca', 25, 1, ?)`).run(AH_CA_UUID, nowIso());
+    // a shell: created with no CA, exactly what the ingest leaves on a non-CRM host
+    await upsertExternalApplicant({ awlId: AWL_ORPH, fullName: AWL_ORPH, email: '', extId: null, opsId: null, materialize: false });
+    await upsertApplicantJoblink(AWL_ORPH, { url: URL_ORPH, materialize: false });
+    const found = (await listUnassignedApplicants()).find((o) => o.awl_id === AWL_ORPH);
+    check('listUnassignedApplicants surfaces an applicant no CA can see (ca_id NULL)', !!found);
+    check('...and counts the job links stranded on it', !!found && Number(found.pending_links) >= 1);
+    // once it has a CA it must leave the invisible set
+    await upsertExternalApplicant({ awlId: AWL_ORPH, fullName: AWL_ORPH, caId: AH_CA_UUID, materialize: false });
+    check('an applicant that HAS a CA is not listed (the view is exactly the invisible set)',
+      !(await listUnassignedApplicants()).some((o) => o.awl_id === AWL_ORPH));
+  } finally {
+    await db.prepare('DELETE FROM applicant_joblinks WHERE awl_id = ?').run(AWL_ORPH);
+    await db.prepare('DELETE FROM job_links WHERE url = ?').run(URL_ORPH);
+    await db.prepare('DELETE FROM applicants WHERE awl_id = ?').run(AWL_ORPH);
+    await db.prepare('DELETE FROM staff WHERE uuid = ?').run(AH_CA_UUID);
+  }
+
+  // ---- the routes + the never-invent rule + the ingest surfacing ----
+  check('a DEV/ADMIN assignment-health list route exists',
+    serverSrc.includes(`app.get('/api/dev/assignment-health', requireAuth, requireRole('dev', 'admin')`));
+  const resIdx = serverSrc.indexOf(`app.post('/api/dev/assignment-health/resolve'`);
+  const resBlock = resIdx >= 0 ? serverSrc.slice(resIdx, serverSrc.indexOf('}));', resIdx)) : '';
+  check('the resolve route re-syncs from the CRM (authoritative) and explains any gap',
+    resBlock.includes('syncApplicantByAwl') && resBlock.includes('diagnoseAssignment'));
+  check('the resolve route NEVER invents a CA or staff row', resBlock.length > 0 && !resBlock.includes('createStaff'));
+  check('the link ingest reports AWLs it could not assign (no silent shell)',
+    /const unassigned = \[\];[\s\S]{0,400}unassigned\.push/.test(serverSrc) && serverSrc.includes('unassigned,'));
+  check('the DEV UI exposes the Assignment health view + Re-resolve',
+    appSrc.includes('renderAssignmentHealth') && appSrc.includes('assignment-health/resolve'));
+}
+
 async function verifyCrmFetch() {
   step('6. CRM fetch (--crm only; needs the Azure connection)');
   const { isConfigured, syncApplicantByAwl } = await import('../connector/applicant-db.js');
@@ -1311,6 +1366,7 @@ try {
   await verifySignupRoles();
   await verifyDeadFixtures();
   await verifyCaWorkHistory();
+  await verifyAssignmentHealth();
   if (process.argv.includes('--crm')) await verifyCrmFetch();
 } catch (err) {
   failed += 1;

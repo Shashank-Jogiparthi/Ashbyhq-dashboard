@@ -359,6 +359,38 @@ export async function syncApplicantByAwl(awlId, { opsId = null } = {}) {
   return syncFromPostgres({ opsId, awlId });
 }
 
+/* ------------------ assignment-gap diagnosis (rule, not a guess) ------------------
+   An applicant with no ca_id is invisible to EVERY CA dashboard, yet the ingest
+   that created it reported "accepted". This names WHY a given AWL has no CA, so
+   the platform can surface and repair it instead of silently orphaning a client.
+   The categories are exhaustive and asserted in verify:flow. */
+export function assignmentGapReason({ inCrm, caExtId, caId }) {
+  if (!inCrm) return 'not_in_crm';            // CRM has no record for this AWL-ID at all
+  if (!caExtId) return 'no_ca_in_crm';         // CRM row exists but names no career_associate_id
+  if (!caId) return 'ca_not_rostered';         // CRM names a CA whose id is not in our staff roster
+  return 'assigned';                           // resolves cleanly - a re-sync will fix the row
+}
+
+// Ask the CRM directly (read-only) what it says about one AWL's assignment.
+export async function diagnoseAssignment(awlId) {
+  const cfg = pgConfig();
+  if (!cfg) return { crmConfigured: false, inCrm: false, gap: 'crm_not_configured' };
+  const awl = normalizeAwlId(awlId);
+  const pg = await getPg();
+  const pool = new pg.Pool(cfg);
+  try {
+    const { rows } = await pool.query(`SELECT * FROM ${INFO_TABLE()} WHERE applywizz_id = $1`, [awl]);
+    if (!rows.length) return { crmConfigured: true, inCrm: false, gap: assignmentGapReason({ inCrm: false }) };
+    const tree = await resolveTree(rows[0]);
+    return {
+      crmConfigured: true, inCrm: true,
+      caExtId: tree.caExtId || null, omExtId: tree.omExtId || null,
+      caId: tree.caId || null, opsId: tree.opsId || null,
+      gap: assignmentGapReason({ inCrm: true, caExtId: tree.caExtId, caId: tree.caId }),
+    };
+  } finally { await pool.end().catch(() => {}); }
+}
+
 /* --------------------- manual JSON ingest mode ---------------------- */
 
 // Load one exported applicant document (the exact shape you shared) with no

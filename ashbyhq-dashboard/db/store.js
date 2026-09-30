@@ -1243,6 +1243,20 @@ export async function upsertExternalApplicant({ awlId, fullName, email, phone, r
   return { created: true, assigned: Boolean(newCa), applicant: await db.prepare('SELECT * FROM applicants WHERE awl_id = ?').get(awlId) };
 }
 
+// Every applicant that NO CA can see: ca_id is NULL. These are the silent
+// orphans an ingest leaves behind when the CRM was unreachable, or when the
+// AWL's CA is not in the roster - the job links sit here with nowhere to go.
+// The DEV "Assignment health" view lists them so a client can never be
+// invisible again. pending_links counts the job links still stuck on the row.
+export async function listUnassignedApplicants() {
+  return db.prepare(`
+    SELECT a.awl_id, a.full_name, a.email, a.ext_id, a.ops_id,
+      (SELECT COUNT(1) FROM applicant_joblinks jl WHERE jl.awl_id = a.awl_id) AS pending_links
+    FROM applicants a
+    WHERE a.ca_id IS NULL
+    ORDER BY pending_links DESC, a.awl_id`).all();
+}
+
 /* ------------------------------------------------------------------ */
 /* WORKER SUPPORT (parallel runner reads these)                        */
 /* ------------------------------------------------------------------ */

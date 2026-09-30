@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 232 checks pass.
+CA under them. 244 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1214,7 +1214,7 @@ and let OMs size their own CAs instead, starting at 25.
 verify:flow (step 7) asserts the four rule halves: an assignment is capped by
 the CA's own limit and NOT the manager's; a CA with no explicit limit defaults
 to 25; /api/ops/ca/:uuid/quota enforces the manager_id guard; and the OM
-Overview exposes the editable per-CA limit. 232 checks pass (see §14).
+Overview exposes the editable per-CA limit. 244 checks pass (see §14).
 
 ====================================================================
 14. v3.6a - THE RECORD FILLS WHAT IT HAS, WITHOUT WAITING ON GENAI
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 232 checks pass.
+"…Number" / location box abstains. 244 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,7 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 232 checks pass.
+watchdog kills + frees the slot. 244 checks pass.
 
 ====================================================================
 16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
@@ -1372,7 +1372,7 @@ One consequence the operator accepted: the whitelist also removes the old
 @applywizz.local DEV/admin-style logins. The two real ADMINs (@applywizz.ai)
 always remain, and DEV sign-up stays open, so access is never globally lost -
 but a re-created login should use an @applywizz.com/.ai address to survive the
-next cleanup. 232 checks pass.
+next cleanup. 244 checks pass.
 
 ====================================================================
 18. v3.6e - SIGN-UP MINTS ONLY CA / OM / DEV, NEVER ADMIN
@@ -1406,7 +1406,7 @@ RULE (not a setting), asserted in verify:flow step 8:
     requireRole('admin') - verify asserts no createStaff(...role:'admin') path
     exists outside sign-up.
 
-232 checks pass.
+244 checks pass.
 
 ====================================================================
 19. v3.6f - THE @applywizz.local DOMAIN IS DEAD, EVERYWHERE
@@ -1443,7 +1443,7 @@ rows they owned (12 references - ca_id on rakesh, manager_id on priya.cam, the
 same submissions) survive with only the phantom owner set NULL, 0 applicants
 moved (they were re-pointed in v3.6d), 64 real @applywizz staff and the 2 real
 admins untouched. Nothing recreates them: seedStaffDirectory only upserts roster
-rows, never the fixtures. 232 checks pass.
+rows, never the fixtures. 244 checks pass.
 
 ====================================================================
 20. v3.7 - CA WORK-HISTORY + ca_data (DYNAMIC EXTERNAL APIs, VISIBILITY-ONLY)
@@ -1516,6 +1516,20 @@ dynamically - never hardcoded, never in .env.
     DEV/ADMIN additionally get
     the External APIs card (Save + per-endpoint Test) to repoint the endpoints.
 
+  * ASSIGNMENT HEALTH (server.js /api/dev/assignment-health + the DEV/ADMIN
+    "Assignment health" tab) is the systemic net against silent orphaning: an
+    applicant whose ca_id is NULL is invisible to EVERY CA dashboard, yet the
+    link ingest that created it reported "accepted" (AWL-543 mapped to Neha Balla
+    in the CRM the whole time). listUnassignedApplicants() lists every such
+    applicant + its stranded pending links; connector/applicant-db.js
+    diagnoseAssignment() names the reason (not_in_crm / no_ca_in_crm /
+    ca_not_rostered / assigned) straight from the CRM, and the resolve route
+    re-runs syncApplicantByAwl (the CRM is authoritative) to repair it. The
+    ingest path itself now re-syncs an existing-but-unassigned applicant (not
+    just a missing one) and returns an `unassigned` list so a shell is never
+    accepted silently. It NEVER invents a CA or a staff row - an AWL the CRM does
+    not know stays flagged, not guessed.
+
 RULE (not a setting), asserted in verify:flow step 10: external-apis.js ships
 the two hosts as overridable DEFAULTS while server.js hardcodes none (it reads
 the resolved settings); with no override saved the default bases are used
@@ -1530,10 +1544,14 @@ live flag is derived from source (a source='live' row -> live true, a span with
 only non-live rows -> false); getCaWorkHistory also carries awlIds + omId and the
 /api/work-history route labels each CA with its OM name and returns an OM filter
 list (so the dashboard's OM column, OM filter and AWL search are backed by real
-resolved data, not invented); the
-inner detail falls back to cache and attaches a local application; and an unset
-base skips the network entirely. Stacks on the working tree; no commit until the
-operator says so. 232 checks pass.
+resolved data, not invented); the inner detail falls back to cache and attaches a
+local application; and an unset base skips the network entirely. verify:flow step
+11 adds the assignment-health guarantee: assignmentGapReason classifies every gap
+exhaustively, listUnassignedApplicants returns exactly the ca_id-NULL set (and
+drops a row once it has a CA), the resolve route re-syncs from the CRM and never
+calls createStaff, and the link ingest reports unassigned AWLs instead of silently
+accepting a shell. Completed work is committed + pushed by default. 244 checks
+pass.
 
 END OF CURRENT-STATE DOC (v3.7) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.
