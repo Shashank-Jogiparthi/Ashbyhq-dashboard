@@ -1470,29 +1470,31 @@ export async function upsertCaWorkHistory(rec) {
 
 // Per-CA capacity over an inclusive [from, to] day span (ISO YYYY-MM-DD strings).
 // `live` marks a CA who has at least one source='live' row in the span (today's
-// active workers), and `lastEnd` is their latest end_time — both drive the
-// dashboard's "CAs live today" view.
+// active workers), `lastEnd` is their latest end_time, `omId` is the owning OM
+// cached on the row, and `awlIds` lists their clients so the dashboard can search
+// a work-history stack by AWL-ID as well as by CA name/email.
 export async function getCaWorkHistory(caUuids, from, to) {
   if (!caUuids || !caUuids.length) return [];
   const ph = caUuids.map(() => '?').join(',');
   const rows = await db.prepare(
-    `SELECT ca_id, awl_id, status, jobs_applied, source, end_time FROM ca_work_history
+    `SELECT ca_id, awl_id, status, jobs_applied, source, end_time, om_id FROM ca_work_history
       WHERE ca_id IN (${ph}) AND work_date >= ? AND work_date <= ?`
   ).all(...caUuids, from, to);
   const byCa = new Map();
   for (const r of rows) {
     let agg = byCa.get(r.ca_id);
-    if (!agg) { agg = { caId: r.ca_id, awls: new Set(), jobsApplied: 0, byStatus: {}, live: false, lastEnd: null }; byCa.set(r.ca_id, agg); }
+    if (!agg) { agg = { caId: r.ca_id, awls: new Set(), jobsApplied: 0, byStatus: {}, live: false, lastEnd: null, omId: null }; byCa.set(r.ca_id, agg); }
     agg.awls.add(r.awl_id);
     agg.jobsApplied += Number(r.jobs_applied || 0);
     const st = r.status || 'UNKNOWN';
     agg.byStatus[st] = (agg.byStatus[st] || 0) + 1;
     if (String(r.source || '').toLowerCase() === 'live') agg.live = true;
     if (r.end_time && (!agg.lastEnd || r.end_time > agg.lastEnd)) agg.lastEnd = r.end_time;
+    if (!agg.omId && r.om_id) agg.omId = r.om_id;
   }
   return [...byCa.values()].map((a) => ({
-    caId: a.caId, awls: a.awls.size, jobsApplied: a.jobsApplied, byStatus: a.byStatus,
-    live: a.live, lastEnd: a.lastEnd,
+    caId: a.caId, awls: a.awls.size, awlIds: [...a.awls], jobsApplied: a.jobsApplied, byStatus: a.byStatus,
+    live: a.live, lastEnd: a.lastEnd, omId: a.omId,
   }));
 }
 

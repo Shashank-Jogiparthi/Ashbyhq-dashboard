@@ -48,6 +48,29 @@ function toast(message, isError = false) {
   setTimeout(() => box.remove(), 4200);
 }
 
+/* A centered modal box (used by "View Logs") so detail opens over the page
+   instead of below a long list. Returns the body element to fill. */
+function openModal(titleHtml) {
+  closeModal();
+  const wrap = document.createElement('div');
+  wrap.id = 'awl-modal';
+  wrap.style.cssText = 'position:fixed;inset:0;z-index:100;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;background:rgba(15,23,42,.55);';
+  wrap.innerHTML = `<div class="card" style="max-width:920px;width:100%;max-height:86vh;overflow:auto;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;position:sticky;top:0;background:inherit;padding-bottom:8px;margin-bottom:6px;border-bottom:1px solid rgba(0,0,0,.10);">
+      <h3 id="awl-modal-title" style="margin:0;">${titleHtml || ''}</h3>
+      <button class="ghost" id="awl-modal-x" style="font-size:16px;flex:none;">Close ×</button>
+    </div>
+    <div id="awl-modal-body"></div></div>`;
+  document.body.appendChild(wrap);
+  const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  wrap.addEventListener('click', (e) => { if (e.target === wrap) close(); });
+  $('awl-modal-x').addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+  return $('awl-modal-body');
+}
+function closeModal() { const m = $('awl-modal'); if (m) m.remove(); }
+
 /* --------------------------- boot / shell -------------------------- */
 
 const ROLE_TABS = {
@@ -161,6 +184,9 @@ $('btn-signout').addEventListener('click', async () => {
 // button, which is the only role the /api/dev/ca-data/refresh route allows.
 const WH_SPAN = { from: '', to: '' };
 const todayStr = () => new Date().toISOString().slice(0, 10);
+const LIVE_CHIP = '<span class="chip" style="background:#16a34a;color:#fff;">LIVE</span>';
+// The last-loaded work-history, kept client-side so search + OM filter are instant.
+let WH_DATA = { from: '', to: '', cas: [], oms: [], summary: {} };
 
 function wireWorkHistoryHeader(role) {
   const bar = $('wh-topbar');
@@ -899,45 +925,65 @@ function wireExternalApis() {
 
 async function loadWorkHistoryList() {
   const from = WH_SPAN.from || todayStr(), to = WH_SPAN.to || todayStr();
-  $('wh-detail').innerHTML = '';
   $('wh-list').innerHTML = '<p class="muted">Loading...</p>';
   try {
     const d = await api(`/api/work-history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
-    const rows = d.cas.map((c) => [
-      `<b>${esc(c.ca.name || c.ca.uuid)}</b> ${c.live ? '<span class="chip" style="background:#16a34a;color:#fff;">LIVE</span>' : ''}<br><span class="muted mono small">${esc(c.ca.email || '')}</span>`,
-      c.awls, c.jobsApplied,
-      Object.entries(c.byStatus || {}).map(([k, v]) => `${esc(k)}:${v}`).join(' - ') || '—',
-      `<button class="primary" data-wh-logs="${esc(c.ca.uuid)}">View Logs</button>`
-    ]);
-    const s = d.summary || {};
-    const strip = `<div class="muted" style="margin:2px 0 8px;"><b>${s.liveCas ?? d.cas.length}</b> CA(s) live \u00b7 <b>${s.clients ?? 0}</b> client(s) \u00b7 <b>${s.jobsApplied ?? 0}</b> job(s) applied in this span</div>`;
-    $('wh-list').innerHTML = `<div class="card"><h3>CAs active ${esc(from)} \u2192 ${esc(to)} (${d.cas.length})</h3>${strip}` +
-      (d.cas.length ? tableHtml(['CA', 'Clients (AWLs)', 'Jobs applied', 'By status', ''], rows)
-        : '<p class="muted">No cached work-history in this span yet \u2014 pick the dates and hit <b>Refresh work-history</b> in the header.</p>') + '</div>';
-    $('wh-list').querySelectorAll('[data-wh-logs]').forEach((b) => b.addEventListener('click', () => openWhLogs(b.dataset.whLogs, from, to)));
+    WH_DATA = { from, to, cas: d.cas || [], oms: d.oms || [], summary: d.summary || {} };
+    const sel = $('wh-om');
+    if (sel) sel.innerHTML = '<option value="">All OMs</option>' +
+      WH_DATA.oms.map((o) => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('');
+    renderWhTable();
   } catch (err) { $('wh-list').innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
 }
 
+// Re-render the CA table from WH_DATA, applying the search box + OM filter
+// client-side (no refetch). Search matches CA name, email, OM, or a client AWL-ID.
+function renderWhTable() {
+  const q = ($('wh-search')?.value || '').trim().toLowerCase();
+  const om = $('wh-om')?.value || '';
+  const { from, to, cas, summary } = WH_DATA;
+  const filtered = cas.filter((c) => {
+    if (om && c.omId !== om) return false;
+    if (!q) return true;
+    if ((c.ca.name || '').toLowerCase().includes(q)) return true;
+    if ((c.ca.email || '').toLowerCase().includes(q)) return true;
+    if ((c.omName || '').toLowerCase().includes(q)) return true;
+    return (c.awlIds || []).some((a) => String(a).toLowerCase().includes(q));
+  });
+  const rows = filtered.map((c) => [
+    `<b>${esc(c.ca.name || c.ca.uuid)}</b> ${c.live ? LIVE_CHIP : ''}<br><span class="muted mono small">${esc(c.ca.email || '')}</span>`,
+    esc(c.omName || '—'),
+    c.awls, c.jobsApplied,
+    Object.entries(c.byStatus || {}).map(([k, v]) => `${esc(k)}:${v}`).join(' - ') || '—',
+    `<button class="primary" data-wh-logs="${esc(c.ca.uuid)}">View Logs</button>`
+  ]);
+  const count = $('wh-count');
+  if (count) count.textContent = filtered.length === cas.length ? `${cas.length} CA(s)` : `${filtered.length} of ${cas.length} CA(s)`;
+  const strip = `<div class="muted" style="margin:2px 0 8px;"><b>${summary.liveCas ?? cas.length}</b> CA(s) live \u00b7 <b>${summary.clients ?? 0}</b> client(s) \u00b7 <b>${summary.jobsApplied ?? 0}</b> job(s) applied in this span</div>`;
+  $('wh-list').innerHTML = `<div class="card"><h3>CAs active ${esc(from)} \u2192 ${esc(to)} (${filtered.length})</h3>${strip}` +
+    (filtered.length ? tableHtml(['CA', 'OM', 'Clients (AWLs)', 'Jobs applied', 'By status', ''], rows)
+      : `<p class="muted">${cas.length ? 'No CAs match this search / OM filter.' : 'No cached work-history in this span yet \u2014 pick the dates and hit <b>Refresh work-history</b> in the header.'}</p>`) + '</div>';
+  $('wh-list').querySelectorAll('[data-wh-logs]').forEach((b) => b.addEventListener('click', () => openWhLogs(b.dataset.whLogs, from, to)));
+}
+
 async function openWhLogs(caUuid, from, to) {
-  const detail = $('wh-detail');
-  detail.innerHTML = '<p class="muted">Loading logs...</p>';
-  detail.scrollIntoView({ behavior: 'smooth', block: 'start' });   // the pane sits below a long CA list
+  const body = openModal('Loading logs\u2026');
   try {
     const d = await api(`/api/work-history/ca/${caUuid}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+    const caName = (d.ca && d.ca.name) || 'CA';
+    const t = $('awl-modal-title'); if (t) t.textContent = `${caName} \u2014 AWL stack ${from} \u2192 ${to}`;
     const cards = d.awls.map((a) => `
       <div class="card queue-card">
-        <div class="head"><b class="mono">${esc(a.awl_id)}</b> — ${esc(a.clientName || '—')} ${a.localApps && a.localApps.length ? `<span class="chip SUCCESS">${a.localApps.length} applied here</span>` : ''}</div>
-        <div class="muted small">jobs applied (API): <b>${a.jobsApplied}</b>${a.clientEmail ? ` · <span class="mono">${esc(a.clientEmail)}</span>` : ''}</div>
-        ${(a.records || []).map((r) => `<div class="muted small mono">${esc(r.workDate)} · ${esc(r.status || '')} · ${r.jobsApplied ?? 0} jobs · ${esc(r.source || '')}</div>`).join('')}
-        ${(a.localApps || []).map((la) => `<div class="muted small">→ <a href="${esc(la.url)}" target="_blank" rel="noopener">${esc(la.company || '')} — ${esc(la.title || '')}</a> ${chip(la.status)}</div>`).join('')}
+        <div class="head"><b class="mono">${esc(a.awl_id)}</b> \u2014 ${esc(a.clientName || '\u2014')} ${a.localApps && a.localApps.length ? `<span class="chip SUCCESS">${a.localApps.length} applied here</span>` : ''}</div>
+        <div class="muted small">jobs applied (API): <b>${a.jobsApplied}</b>${a.clientEmail ? ` \u00b7 <span class="mono">${esc(a.clientEmail)}</span>` : ''}</div>
+        ${(a.records || []).map((r) => `<div class="muted small mono">${esc(r.workDate)} \u00b7 ${esc(r.status || '')} \u00b7 ${r.jobsApplied ?? 0} jobs \u00b7 ${esc(r.source || '')}</div>`).join('')}
+        ${(a.localApps || []).map((la) => `<div class="muted small">\u2192 <a href="${esc(la.url)}" target="_blank" rel="noopener">${esc(la.company || '')} \u2014 ${esc(la.title || '')}</a> ${chip(la.status)}</div>`).join('')}
       </div>`).join('');
-    detail.innerHTML = `<div class="card"><h3>${esc((d.ca && d.ca.name) || 'CA')} — AWL stack ${esc(from)} → ${esc(to)} <button id="wh-detail-close" class="ghost" style="float:right;">Close ×</button></h3>
-      ${cards || '<p class="muted">No cached work-history for this CA in the span.</p>'}
+    body.innerHTML = `${cards || '<p class="muted">No cached work-history for this CA in the span.</p>'}
       <div class="actions"><button class="primary" id="wh-full-log">Open full CA log (screenshots / answers)</button></div>
-      <div id="wh-full-pane"></div></div>`;
-    $('wh-detail-close').addEventListener('click', () => { detail.innerHTML = ''; });
+      <div id="wh-full-pane"></div>`;
     $('wh-full-log').addEventListener('click', () => renderCaSummaryInto($('wh-full-pane'), caUuid));
-  } catch (err) { detail.innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
+  } catch (err) { body.innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
 }
 
 async function renderWorkHistory() {
@@ -954,10 +1000,18 @@ async function renderWorkHistory() {
       <b>CA work-history \u2014 ${esc(WH_SPAN.from)} \u2192 ${esc(WH_SPAN.to)}</b>
       <p class="muted">Use the <b>From / To</b> dates and <b>Load</b> in the header${isDev ? ' \u2014 <b>Refresh work-history</b> pulls the latest from the external API (this also rebuilds <span class="mono">ca_data</span> and points applicants at their real CA/OM for visibility only \u2014 it never auto-queues an application)' : ''}.</p>
     </div>
-    <div id="wh-list"></div>
-    <div id="wh-detail"></div>`;
+    <div class="card" style="margin-bottom:14px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+      <label class="muted small" style="flex:1;min-width:240px;">Search (CA name, email, OM, or a client AWL-ID)
+        <input id="wh-search" style="width:100%;" placeholder="e.g. AWL-25663 or Aparna" /></label>
+      <label class="muted small" style="min-width:190px;">Filter by OM
+        <select id="wh-om" style="width:100%;"><option value="">All OMs</option></select></label>
+      <span class="muted small" id="wh-count" style="padding-bottom:6px;"></span>
+    </div>
+    <div id="wh-list"></div>`;
 
   if (isDev) wireExternalApis();
+  $('wh-search').addEventListener('input', renderWhTable);
+  $('wh-om').addEventListener('change', renderWhTable);
   await loadWorkHistoryList();
 }
 

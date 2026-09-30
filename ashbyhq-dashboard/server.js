@@ -789,10 +789,18 @@ app.get('/api/work-history', requireAuth, requireRole('ops', 'dev', 'admin'), wr
   const cas = await scopedCas(req);
   const agg = await getCaWorkHistory(cas.map((c) => c.uuid), from, to);
   const byUuid = new Map(cas.map((c) => [c.uuid, c]));
+  const omName = new Map((await listStaff('ops')).map((o) => [o.uuid, o.name]));
   const rows = agg.map((a) => {
     const s = byUuid.get(a.caId) || {};
-    return { ca: { uuid: a.caId, name: s.name, email: s.email }, awls: a.awls, jobsApplied: a.jobsApplied, byStatus: a.byStatus, live: a.live, lastEnd: a.lastEnd };
+    const omId = a.omId || s.manager_id || null;   // cached edge, else the live staff manager
+    return {
+      ca: { uuid: a.caId, name: s.name, email: s.email },
+      awls: a.awls, awlIds: a.awlIds, jobsApplied: a.jobsApplied, byStatus: a.byStatus,
+      live: a.live, lastEnd: a.lastEnd, omId, omName: omName.get(omId) || null
+    };
   }).sort((x, y) => y.jobsApplied - x.jobsApplied);
+  const omsSeen = new Map();
+  for (const r of rows) if (r.omId) omsSeen.set(r.omId, r.omName || r.omId);
   return {
     from, to,
     summary: {
@@ -801,6 +809,7 @@ app.get('/api/work-history', requireAuth, requireRole('ops', 'dev', 'admin'), wr
       clients: rows.reduce((s, c) => s + (c.awls || 0), 0),
       jobsApplied: rows.reduce((s, c) => s + (c.jobsApplied || 0), 0),
     },
+    oms: [...omsSeen.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => String(a.name).localeCompare(String(b.name))),
     cas: rows
   };
 }));

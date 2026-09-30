@@ -1106,7 +1106,7 @@ async function verifyCaWorkHistory() {
   const { buildCaData } = await import('../connector/ca-data.js');
   const { refreshWorkHistory } = await import('../connector/work-history.js');
   const {
-    getCaWorkHistory, getCaWorkHistoryDetail, findStaffByExtId, upsertExternalApplicant, upsertApplicantJoblink, upsertCaWorkHistory
+    getCaWorkHistory, getCaWorkHistoryDetail, findStaffByExtId, upsertExternalApplicant, upsertApplicantJoblink, upsertCaWorkHistory, listStaff
   } = await import('../db/store.js');
   const extSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'connector', 'external-apis.js'), 'utf8');
   const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
@@ -1123,6 +1123,10 @@ async function verifyCaWorkHistory() {
   const refreshBlock = refreshIdx >= 0 ? serverSrc.slice(refreshIdx, serverSrc.indexOf('}));', refreshIdx)) : '';
   check('the ca-data refresh route never queues scans (visibility only)',
     refreshIdx >= 0 && refreshBlock.length > 0 && !refreshBlock.includes('queueUnscannedLinks'));
+  const whIdx = serverSrc.indexOf(`app.get('/api/work-history',`);
+  const whBlock = whIdx >= 0 ? serverSrc.slice(whIdx, serverSrc.indexOf('}));', whIdx)) : '';
+  check('the /api/work-history route labels each CA with its OM name + returns an OM filter list',
+    whBlock.includes('omName') && whBlock.includes('oms:') && whBlock.includes("listStaff('ops')"));
 
   // ---- A2. default vs override resolution (system_state wins; blank = cache-only) ----
   const { extApiSettings, clearExtApiCache, EXT_API_KEYS } = await import('../connector/external-apis.js');
@@ -1170,10 +1174,10 @@ async function verifyCaWorkHistory() {
     { applywizz_id: AWL_UNROST, full_name: 'WH Unroster', personal_email: '', career_associate_id: 'verify-wh-unrost-ext', career_associate_manager_id: BALAJI_EXT }
   ];
 
-  let balajiUuid = null;
+  let balajiUuid = (await findStaffByExtId(BALAJI_EXT))?.uuid || null;
   try {
     await db.prepare(`INSERT INTO staff (uuid, email, name, role, manager_id, applicant_quota, ext_id, active, last_sign_in, created_at)
-      VALUES (?, ?, 'WH Test CA', 'ca', NULL, 25, 'verify-wh-ca-ext', 1, NULL, ?)`).run(TESTCA_UUID, TESTCA_EMAIL, nowW);
+      VALUES (?, ?, 'WH Test CA', 'ca', ?, 25, 'verify-wh-ca-ext', 1, NULL, ?)`).run(TESTCA_UUID, TESTCA_EMAIL, balajiUuid, nowW);
 
     // ---- B + C. buildCaData ----
     const res = await buildCaData({ dryRun: false, actor: 'verify', readInfoRows: infoRows, caEmailsImpl: ceImpl });
@@ -1241,6 +1245,13 @@ async function verifyCaWorkHistory() {
     const aggBackfill = await getCaWorkHistory([TESTCA_UUID], '2026-02-02', '2026-02-02');
     check('getCaWorkHistory does NOT mark a CA live when the span only has non-live rows',
       aggBackfill.length === 1 && aggBackfill[0].live === false);
+
+    // ---- the OM column + AWL search the dashboard relies on ----
+    check('getCaWorkHistory lists each CA\'s client AWL-IDs (dashboard can search a stack by AWL)',
+      Array.isArray(e.awlIds) && e.awlIds.includes(AWL_VIS) && e.awlIds.includes(AWL_LOC));
+    check('getCaWorkHistory carries the owning OM id cached on the row', e.omId === balajiUuid);
+    check('that OM id resolves to a real OM name for the column / filter',
+      !!balajiUuid && !!(await listStaff('ops')).find((o) => o.uuid === balajiUuid)?.name);
 
     // ---- E. inner detail: cache-only fallback + local application attach ----
     // applications.awl_id has an FK to applicants, so the local-attach test needs
