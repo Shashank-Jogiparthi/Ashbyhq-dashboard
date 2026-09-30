@@ -87,6 +87,8 @@ const CRM_CONFIG_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url))
 const SCAN_WORKER_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'link-scanner.js');
 const PAGE_EVIDENCE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'core', 'page-evidence.js');
 const STAFF_PURGE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'connector', 'staff-purge.js');
+// The automation engine lives at the repo root (one level above the dashboard).
+const ENGINE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'ashby-hybrid-automation.js');
 const SEED_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'seed.js');
 function runScanScript(url, env) {
   return runChild(SCAN_SCRIPT, [url], env);
@@ -1340,6 +1342,27 @@ async function verifyAssignmentHealth() {
     appSrc.includes('renderAssignmentHealth') && appSrc.includes('assignment-health/resolve'));
 }
 
+async function verifySubmissionProof() {
+  step('12. Submission proof: the acknowledgement is the POST-submit page, not the form');
+  const eng = fs.readFileSync(ENGINE_SCRIPT, 'utf8');
+  const fnIdx = eng.indexOf('async function waitForSubmissionOutcome');
+  const fn = fnIdx >= 0 ? eng.slice(fnIdx, eng.indexOf('\nasync function', fnIdx + 10)) : '';
+
+  // The bug: a bare "success" token matched the job copy that sits ON the form,
+  // so a run was called SUCCESS and its "acknowledgement" shot captured the
+  // still-visible form (Submit button and all) without ever transitioning.
+  check('the success matcher dropped the bare "success" token (no false positive on the form)',
+    fn.length > 0 && !/\|success\/i/.test(fn) && !/\|\s*success\s*\|/.test(fn));
+  // Success is declared only once the form's own submit control is gone - the
+  // structural proof the click actually reached the confirmation screen.
+  check('success is gated on the form submit control being gone (structural proof)',
+    /submitControl/.test(fn) && /formStillOpen/.test(fn) && /!formStillOpen\s*&&/.test(fn));
+  // The two evidence shots stay distinct: #1 pre-submit before the click, #2 the
+  // acknowledgement captured on the success branch after the transition.
+  check('the acknowledgement is captured on the success branch AFTER the transition',
+    /'pre-submit'/.test(eng) && /status === 'success'[\s\S]{0,160}application-success/.test(eng));
+}
+
 async function verifyCrmFetch() {
   step('6. CRM fetch (--crm only; needs the Azure connection)');
   const { isConfigured, syncApplicantByAwl } = await import('../connector/applicant-db.js');
@@ -1367,6 +1390,7 @@ try {
   await verifyDeadFixtures();
   await verifyCaWorkHistory();
   await verifyAssignmentHealth();
+  await verifySubmissionProof();
   if (process.argv.includes('--crm')) await verifyCrmFetch();
 } catch (err) {
   failed += 1;

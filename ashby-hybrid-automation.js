@@ -324,11 +324,24 @@ async function humanTypeValue(page, locator, value) {
 }
 
 async function waitForSubmissionOutcome(page) {
+  // Ashby's REAL post-submit confirmation. The old matcher ended in a bare
+  // "success", which matched the job-posting copy that sits ON the form itself,
+  // so a run could be called SUCCESS - and its "acknowledgement" screenshot
+  // capture the still-visible form with its Submit button - without the page ever
+  // having transitioned. These phrases only appear on the confirmation screen
+  // that replaces the form after a genuine submit.
   const successMessage = page.getByText(
-    /application has been received|thank you for your interest|application submitted|success/i
+    /application (?:has been|was|is|successfully)? ?(?:received|submitted)|thanks for applying|we.?ve received your application|successfully submitted|you.?re all set/i
   ).first();
   const validationMessage = page.getByText(
     /your form has errors|missing entry for required field|please correct|required field|missing required fields|fill in the required fields/i
+  ).first();
+  // The form's own submit control. Its disappearance is the structural proof the
+  // click actually went through: a confirmation phrase seen while the Submit
+  // button is still on screen means we are looking at the form, not the
+  // acknowledgement, so it must not be treated as success.
+  const submitControl = page.locator(
+    'button:has-text("Submit Application"), button:has-text("Submit application"), form button[type="submit"]'
   ).first();
 
   let lastBannerText = '';
@@ -338,15 +351,17 @@ async function waitForSubmissionOutcome(page) {
       lastBannerText = bannerText;
     }
 
-    if (await successMessage.isVisible().catch(() => false)) {
-      console.log('Submission success acknowledgement detected.');
-      return { status: 'success', bannerText: lastBannerText };
-    }
-
     if (await validationMessage.isVisible().catch(() => false)) {
       const validationText = await validationMessage.textContent().catch(() => '') || lastBannerText || 'Validation message detected after submit.';
       console.log(`Missing or invalid field message detected after submit: ${validationText}`);
       return { status: 'missing-fields', bannerText: validationText };
+    }
+
+    // Success only once the form is gone AND a real confirmation is showing.
+    const formStillOpen = await submitControl.isVisible().catch(() => false);
+    if (!formStillOpen && await successMessage.isVisible().catch(() => false)) {
+      console.log('Submission success acknowledgement detected (form replaced by confirmation).');
+      return { status: 'success', bannerText: lastBannerText };
     }
 
     await page.waitForTimeout(500);
