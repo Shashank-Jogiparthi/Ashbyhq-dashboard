@@ -1106,7 +1106,7 @@ async function verifyCaWorkHistory() {
   const { buildCaData } = await import('../connector/ca-data.js');
   const { refreshWorkHistory } = await import('../connector/work-history.js');
   const {
-    getCaWorkHistory, getCaWorkHistoryDetail, findStaffByExtId, upsertExternalApplicant, upsertApplicantJoblink
+    getCaWorkHistory, getCaWorkHistoryDetail, findStaffByExtId, upsertExternalApplicant, upsertApplicantJoblink, upsertCaWorkHistory
   } = await import('../db/store.js');
   const extSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'connector', 'external-apis.js'), 'utf8');
   const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
@@ -1206,8 +1206,8 @@ async function verifyCaWorkHistory() {
     const FROM = '2026-01-05', TO = '2026-01-06';
     const FIX = {
       [TESTCA_EMAIL]: [
-        { date: '2026-01-05', applywizz_id: AWL_VIS, ca_email: TESTCA_EMAIL, client_name: 'Roster', client_email: 'r@x.z', jobs_applied: 25, emails_submitted: 25, emails_required: 25, status: 'Completed', source: 'live' },
-        { date: '2026-01-06', applywizz_id: AWL_LOC, ca_email: TESTCA_EMAIL, client_name: 'Local', client_email: 'l@x.z', jobs_applied: 5, emails_submitted: 5, emails_required: 5, status: 'Completed', source: 'live' },
+        { date: '2026-01-05', applywizz_id: AWL_VIS, ca_email: TESTCA_EMAIL, client_name: 'Roster', client_email: 'r@x.z', jobs_applied: 25, emails_submitted: 25, emails_required: 25, status: 'Completed', source: 'live', end_time: '2026-01-05T09:00:00.000Z' },
+        { date: '2026-01-06', applywizz_id: AWL_LOC, ca_email: TESTCA_EMAIL, client_name: 'Local', client_email: 'l@x.z', jobs_applied: 5, emails_submitted: 5, emails_required: 5, status: 'Completed', source: 'live', end_time: '2026-01-06T10:00:00.000Z' },
         { date: '2026-01-10', applywizz_id: AWL_VIS, ca_email: TESTCA_EMAIL, client_name: 'Out', client_email: '', jobs_applied: 99, emails_submitted: 99, emails_required: 99, status: 'Completed', source: 'live' }
       ],
       [UNROST_EMAIL]: [
@@ -1233,6 +1233,14 @@ async function verifyCaWorkHistory() {
     check('getCaWorkHistory honours a narrowed [from,to]', (aggOne[0] || {}).awls === 1 && (aggOne[0] || {}).jobsApplied === 5);
     const aggBalaji = await getCaWorkHistory(balajiUuid ? [balajiUuid] : [], FROM, TO);
     check('scoping to a uuid set returns only that CA\'s rows (OM sees just their tree)', aggBalaji.length === 0 && aggFull.length === 1);
+
+    // ---- the "CAs live today" view flag: derived from source, not always-on ----
+    check('getCaWorkHistory marks a live CA (source=live) + latest end_time',
+      e.live === true && e.lastEnd === '2026-01-06T10:00:00.000Z');
+    await upsertCaWorkHistory({ workDate: '2026-02-02', awlId: AWL_VIS, caEmail: TESTCA_EMAIL, caId: TESTCA_UUID, jobsApplied: 4, status: 'Completed', source: 'backfill' });
+    const aggBackfill = await getCaWorkHistory([TESTCA_UUID], '2026-02-02', '2026-02-02');
+    check('getCaWorkHistory does NOT mark a CA live when the span only has non-live rows',
+      aggBackfill.length === 1 && aggBackfill[0].live === false);
 
     // ---- E. inner detail: cache-only fallback + local application attach ----
     // applications.awl_id has an FK to applicants, so the local-attach test needs

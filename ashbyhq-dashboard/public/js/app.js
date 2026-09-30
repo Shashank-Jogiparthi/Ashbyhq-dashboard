@@ -904,13 +904,16 @@ async function loadWorkHistoryList() {
   try {
     const d = await api(`/api/work-history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
     const rows = d.cas.map((c) => [
-      `<b>${esc(c.ca.name || c.ca.uuid)}</b><br><span class="muted mono small">${esc(c.ca.email || '')}</span>`,
+      `<b>${esc(c.ca.name || c.ca.uuid)}</b> ${c.live ? '<span class="chip" style="background:#16a34a;color:#fff;">LIVE</span>' : ''}<br><span class="muted mono small">${esc(c.ca.email || '')}</span>`,
       c.awls, c.jobsApplied,
       Object.entries(c.byStatus || {}).map(([k, v]) => `${esc(k)}:${v}`).join(' - ') || '—',
       `<button class="primary" data-wh-logs="${esc(c.ca.uuid)}">View Logs</button>`
     ]);
-    $('wh-list').innerHTML = `<div class="card"><h3>CAs active ${esc(from)} → ${esc(to)} (${d.cas.length})</h3>` +
-      tableHtml(['CA', 'Clients (AWLs)', 'Jobs applied', 'By status', ''], rows) + '</div>';
+    const s = d.summary || {};
+    const strip = `<div class="muted" style="margin:2px 0 8px;"><b>${s.liveCas ?? d.cas.length}</b> CA(s) live \u00b7 <b>${s.clients ?? 0}</b> client(s) \u00b7 <b>${s.jobsApplied ?? 0}</b> job(s) applied in this span</div>`;
+    $('wh-list').innerHTML = `<div class="card"><h3>CAs active ${esc(from)} \u2192 ${esc(to)} (${d.cas.length})</h3>${strip}` +
+      (d.cas.length ? tableHtml(['CA', 'Clients (AWLs)', 'Jobs applied', 'By status', ''], rows)
+        : '<p class="muted">No cached work-history in this span yet \u2014 pick the dates and hit <b>Refresh work-history</b> in the header.</p>') + '</div>';
     $('wh-list').querySelectorAll('[data-wh-logs]').forEach((b) => b.addEventListener('click', () => openWhLogs(b.dataset.whLogs, from, to)));
   } catch (err) { $('wh-list').innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
 }

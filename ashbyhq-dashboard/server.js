@@ -789,12 +789,19 @@ app.get('/api/work-history', requireAuth, requireRole('ops', 'dev', 'admin'), wr
   const cas = await scopedCas(req);
   const agg = await getCaWorkHistory(cas.map((c) => c.uuid), from, to);
   const byUuid = new Map(cas.map((c) => [c.uuid, c]));
+  const rows = agg.map((a) => {
+    const s = byUuid.get(a.caId) || {};
+    return { ca: { uuid: a.caId, name: s.name, email: s.email }, awls: a.awls, jobsApplied: a.jobsApplied, byStatus: a.byStatus, live: a.live, lastEnd: a.lastEnd };
+  }).sort((x, y) => y.jobsApplied - x.jobsApplied);
   return {
     from, to,
-    cas: agg.map((a) => {
-      const s = byUuid.get(a.caId) || {};
-      return { ca: { uuid: a.caId, name: s.name, email: s.email }, awls: a.awls, jobsApplied: a.jobsApplied, byStatus: a.byStatus };
-    }).sort((x, y) => y.jobsApplied - x.jobsApplied)
+    summary: {
+      cas: rows.length,
+      liveCas: rows.filter((c) => c.live).length,
+      clients: rows.reduce((s, c) => s + (c.awls || 0), 0),
+      jobsApplied: rows.reduce((s, c) => s + (c.jobsApplied || 0), 0),
+    },
+    cas: rows
   };
 }));
 
