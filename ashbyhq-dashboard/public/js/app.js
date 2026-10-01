@@ -216,7 +216,7 @@ function wireWorkHistoryHeader(role) {
     try {
       const r = await api('/api/dev/ca-data/refresh', { method: 'POST', body: JSON.stringify({ from: WH_SPAN.from, to: WH_SPAN.to }) });
       const cd = r.caData || {}, wh = r.workHistory || {};
-      toast(`ca_data ${cd.caDataWritten ?? cd.wouldWrite ?? 0} AWLs \u00b7 ` + (wh.skipped ? `work-history ${wh.skipped}` : `work-history ${wh.upserted ?? 0} rows / ${wh.cas ?? 0} CAs`));
+      toast(`ca_data ${cd.caDataWritten ?? cd.wouldWrite ?? 0} AWLs \u00b7 ` + (wh.skipped ? `work-history ${wh.skipped}` : `work-history ${wh.upserted ?? 0} rows / ${wh.cas ?? 0} CAs \u00b7 ${wh.assigned ?? 0} AWLs assigned to their CA`));
     } catch (err) { toast(err.message, true); }
     finally { $('wh-refresh').disabled = false; }
     openTab('workhistory');

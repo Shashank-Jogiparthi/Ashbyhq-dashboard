@@ -1157,18 +1157,23 @@ async function verifyCaWorkHistory() {
   const BALAJI_EXT = '9dc9376e-fbc5-440b-932f-38da10b89a70';
   const TESTCA_UUID = 'verify-wh-ca';
   const TESTCA_EMAIL = 'verify-wh-ca@applywizz.ai';
+  const NEWCA_UUID = 'verify-wh-newca';      // a SECOND rostered CA (a client can be shifted to them)
+  const NEWCA_EMAIL = 'verify-wh-newca@applywizz.ai';
   const UNROST_EMAIL = 'verify-wh-unrost@applywizz.ai';
   const AWL_VIS = 'AWL-VERIFY-WH1';   // rostered CA, visibility-only, cache-only detail
   const AWL_UNROST = 'AWL-VERIFY-WH2'; // CA uuid absent from roster, present in /api/ca/emails
   const AWL_LOC = 'AWL-VERIFY-WH3';    // rostered CA, has a local application (inner detail)
   const AWL_GUARD = 'AWL-VERIFY-WHG';  // proves the materialize flag actually gates
+  const AWL_SHIFT = 'AWL-VERIFY-WH4';   // day-to-day shift: earlier TESTCA row, later NEWCA row
+  const AWL_HANDOVER = 'AWL-VERIFY-WH5';// same-day handover: TESTCA early end_time, NEWCA later end_time
   const URL_VIS = 'https://jobs.ashbyhq.com/verify/9a9a9a9a-9a9a-4a9a-8a9a-9a9a9a9a9a9a';
   const URL_G = 'https://jobs.ashbyhq.com/verify/8b8b8b8b-8b8b-4b8b-8b8b-8b8b8b8b8b8b';
   const URL_L = 'https://jobs.ashbyhq.com/verify/7c7c7c7c-7c7c-4c7c-8c7c-7c7c7c7c7c7c';
   const nowW = nowIso();
 
-  const ceImpl = async () => ({ ok: true, count: 2, users: [
+  const ceImpl = async () => ({ ok: true, count: 3, users: [
     { id: 'verify-wh-ca-ext', name: 'WH CA', email: TESTCA_EMAIL, role: 'ca' },
+    { id: 'verify-wh-newca-ext', name: 'WH New CA', email: NEWCA_EMAIL, role: 'ca' },
     { id: 'verify-wh-unrost-ext', name: 'WH Un', email: UNROST_EMAIL, role: 'ca' }
   ] });
   const infoRows = async () => [
@@ -1180,6 +1185,8 @@ async function verifyCaWorkHistory() {
   try {
     await db.prepare(`INSERT INTO staff (uuid, email, name, role, manager_id, applicant_quota, ext_id, active, last_sign_in, created_at)
       VALUES (?, ?, 'WH Test CA', 'ca', ?, 25, 'verify-wh-ca-ext', 1, NULL, ?)`).run(TESTCA_UUID, TESTCA_EMAIL, balajiUuid, nowW);
+    await db.prepare(`INSERT INTO staff (uuid, email, name, role, manager_id, applicant_quota, ext_id, active, last_sign_in, created_at)
+      VALUES (?, ?, 'WH New CA', 'ca', ?, 25, 'verify-wh-newca-ext', 1, NULL, ?)`).run(NEWCA_UUID, NEWCA_EMAIL, balajiUuid, nowW);
 
     // ---- B + C. buildCaData ----
     const res = await buildCaData({ dryRun: false, actor: 'verify', readInfoRows: infoRows, caEmailsImpl: ceImpl });
@@ -1214,7 +1221,15 @@ async function verifyCaWorkHistory() {
       [TESTCA_EMAIL]: [
         { date: '2026-01-05', applywizz_id: AWL_VIS, ca_email: TESTCA_EMAIL, client_name: 'Roster', client_email: 'r@x.z', jobs_applied: 25, emails_submitted: 25, emails_required: 25, status: 'Completed', source: 'live', end_time: '2026-01-05T09:00:00.000Z' },
         { date: '2026-01-06', applywizz_id: AWL_LOC, ca_email: TESTCA_EMAIL, client_name: 'Local', client_email: 'l@x.z', jobs_applied: 5, emails_submitted: 5, emails_required: 5, status: 'Completed', source: 'live', end_time: '2026-01-06T10:00:00.000Z' },
-        { date: '2026-01-10', applywizz_id: AWL_VIS, ca_email: TESTCA_EMAIL, client_name: 'Out', client_email: '', jobs_applied: 99, emails_submitted: 99, emails_required: 99, status: 'Completed', source: 'live' }
+        { date: '2026-01-10', applywizz_id: AWL_VIS, ca_email: TESTCA_EMAIL, client_name: 'Out', client_email: '', jobs_applied: 99, emails_submitted: 99, emails_required: 99, status: 'Completed', source: 'live' },
+        // AWL_SHIFT: TESTCA worked it on 01-03, then NEWCA takes over on 01-04 (day-to-day shift)
+        { date: '2026-01-03', applywizz_id: AWL_SHIFT, ca_email: TESTCA_EMAIL, client_name: 'Shifted', client_email: 's@x.z', jobs_applied: 1, emails_submitted: 1, emails_required: 1, status: 'Completed', source: 'live', end_time: '2026-01-03T09:00:00.000Z' },
+        // AWL_HANDOVER: TESTCA worked it 08:00, NEWCA finishes the SAME day at 18:00 (end_time tie-break)
+        { date: '2026-01-03', applywizz_id: AWL_HANDOVER, ca_email: TESTCA_EMAIL, client_name: 'Handover', client_email: '', jobs_applied: 2, emails_submitted: 2, emails_required: 2, status: 'Completed', source: 'live', end_time: '2026-01-03T08:00:00.000Z' }
+      ],
+      [NEWCA_EMAIL]: [
+        { date: '2026-01-04', applywizz_id: AWL_SHIFT, ca_email: NEWCA_EMAIL, client_name: 'Shifted', client_email: 's@x.z', jobs_applied: 3, emails_submitted: 3, emails_required: 3, status: 'Completed', source: 'live', end_time: '2026-01-04T09:00:00.000Z' },
+        { date: '2026-01-03', applywizz_id: AWL_HANDOVER, ca_email: NEWCA_EMAIL, client_name: 'Handover', client_email: '', jobs_applied: 4, emails_submitted: 4, emails_required: 4, status: 'Completed', source: 'live', end_time: '2026-01-03T18:00:00.000Z' }
       ],
       [UNROST_EMAIL]: [
         { date: '2026-01-05', applywizz_id: AWL_UNROST, ca_email: UNROST_EMAIL, client_name: 'Un', client_email: '', jobs_applied: 3, emails_submitted: 3, emails_required: 3, status: 'Completed', source: 'live' }
@@ -1226,6 +1241,28 @@ async function verifyCaWorkHistory() {
     const cwhUn = await db.prepare('SELECT ca_id FROM ca_work_history WHERE awl_id = ?').get(AWL_UNROST);
     check('refreshWorkHistory upserts + resolves ca_id from the cached email', wh.upserted >= 4 && cwhVis && cwhVis.ca_id === TESTCA_UUID);
     check('refreshWorkHistory leaves an un-rostered email ca_id NULL', cwhUn && cwhUn.ca_id == null);
+
+    // ---- work-history's OWN resolved CA drives applicant visibility (not the AWL API key) ----
+    // AWL_LOC appears ONLY in the work-history feed above, never in buildCaData's CRM rows,
+    // so it is the perfect proof that the cached work-history attribution points the applicant.
+    const apLoc = await db.prepare('SELECT ca_id, ops_id FROM applicants WHERE awl_id = ?').get(AWL_LOC);
+    check('refreshWorkHistory points a CRM-unresolved AWL at the work-history CA + OM',
+      apLoc && apLoc.ca_id === TESTCA_UUID && apLoc.ops_id === balajiUuid);
+    const appsLocAfterWh = Number((await db.prepare('SELECT COUNT(1) AS n FROM applications WHERE awl_id = ?').get(AWL_LOC))?.n || 0);
+    check('the work-history assignment created NO application (visibility-only, never auto-queues)', appsLocAfterWh === 0);
+    const apUnrost = await db.prepare('SELECT ca_id FROM applicants WHERE awl_id = ?').get(AWL_UNROST);
+    check('an un-rostered work-history CA never invents an assignment (applicant ca_id stays NULL)', !apUnrost || apUnrost.ca_id == null);
+    check('refreshWorkHistory reports how many AWLs it assigned to their CA',
+      typeof wh.assigned === 'number' && wh.assigned >= 2);
+    // The feed is DYNAMIC: a client can be shifted to a different CA. The applicant
+    // must follow the MOST RECENT attributed CA, never freeze on the earlier owner.
+    const apShift = await db.prepare('SELECT ca_id FROM applicants WHERE awl_id = ?').get(AWL_SHIFT);
+    check('a client shifted to another CA the next day follows the LATEST work-history CA',
+      apShift && apShift.ca_id === NEWCA_UUID);
+    const apHandover = await db.prepare('SELECT ca_id FROM applicants WHERE awl_id = ?').get(AWL_HANDOVER);
+    check('a same-day handover resolves to the later end_time, not CA iteration order',
+      apHandover && apHandover.ca_id === NEWCA_UUID);
+
     const before = Number((await db.prepare('SELECT COUNT(1) AS n FROM ca_work_history WHERE ca_email IN (?, ?)').get(TESTCA_EMAIL, UNROST_EMAIL))?.n || 0);
     await refreshWorkHistory({ from: FROM, to: TO, caEmailsImpl: ceImpl, workHistoryImpl: whImpl });
     const after = Number((await db.prepare('SELECT COUNT(1) AS n FROM ca_work_history WHERE ca_email IN (?, ?)').get(TESTCA_EMAIL, UNROST_EMAIL))?.n || 0);
@@ -1274,7 +1311,7 @@ async function verifyCaWorkHistory() {
     const deg = await refreshWorkHistory({ from: FROM, to: TO, caEmailsImpl: async () => ({ ok: false, skipped: 'not_configured', users: [] }), workHistoryImpl: spy });
     check('graceful degrade: unset ca_mgmt_base returns not_configured and never calls the network', deg.skipped === 'not_configured' && whCalled === false);
   } finally {
-    for (const awl of [AWL_VIS, AWL_UNROST, AWL_LOC, AWL_GUARD]) {
+    for (const awl of [AWL_VIS, AWL_UNROST, AWL_LOC, AWL_GUARD, AWL_SHIFT, AWL_HANDOVER]) {
       await db.prepare('DELETE FROM application_events WHERE application_id IN (SELECT id FROM applications WHERE awl_id = ?)').run(awl);
       await db.prepare('DELETE FROM applications WHERE awl_id = ?').run(awl);
       await db.prepare('DELETE FROM applicant_joblinks WHERE awl_id = ?').run(awl);
@@ -1282,8 +1319,8 @@ async function verifyCaWorkHistory() {
       await db.prepare('DELETE FROM ca_data WHERE awl_id = ?').run(awl);
     }
     for (const u of [URL_VIS, URL_G, URL_L]) await db.prepare('DELETE FROM job_links WHERE url = ?').run(u);
-    await db.prepare('DELETE FROM ca_work_history WHERE ca_email IN (?, ?)').run(TESTCA_EMAIL, UNROST_EMAIL);
-    await db.prepare('DELETE FROM staff WHERE uuid = ?').run(TESTCA_UUID);
+    await db.prepare('DELETE FROM ca_work_history WHERE ca_email IN (?, ?, ?)').run(TESTCA_EMAIL, NEWCA_EMAIL, UNROST_EMAIL);
+    await db.prepare('DELETE FROM staff WHERE uuid IN (?, ?)').run(TESTCA_UUID, NEWCA_UUID);
   }
 }
 

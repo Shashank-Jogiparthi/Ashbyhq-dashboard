@@ -9,13 +9,27 @@
    (staff.email), and its OM (om_id) from that CA's manager_id edge — so the
    work-history view joins cleanly to the staff tree the directory already built.
 
+   Assignment side-effect (visibility only): the work-history feed already names
+   the CA actually working each AWL, resolved to a rostered staff uuid. That uuid
+   — NOT the CRM clients_additional_info.career_associate_id ("the AWL's API key")
+   — is what we point applicants.ca_id at, so a CA sees their whole book even when
+   the CRM row is absent or its career_associate_id matches no roster member. The
+   feed is DYNAMIC, not static: clients get shifted between CAs day to day (and on
+   a handover, even within one day), so the current owner of an AWL is whoever has
+   the MOST RECENT dated activity. We key on date then end/start time — never the
+   first row we happened to iterate — and re-point the applicant to that CA (the
+   open, non-SUCCESS applications follow the new owner inside upsertExternalApplicant;
+   SUCCESS history is left untouched). We NEVER invent a CA (an email that is not
+   rostered is skipped), and use materialize:false so no application or scan
+   backlog is ever created.
+
    Everything is injectable (caEmailsImpl / workHistoryImpl) so verify:flow drives
    it with fixtures and never hits the network. If `ca_mgmt_base` is unset the
    external call degrades to { skipped:'not_configured' } and we write nothing,
    leaving the dashboard to serve whatever is already cached.
    ===================================================================== */
 import { db } from '../db/index.js';
-import { upsertCaWorkHistory, logEvent } from '../db/store.js';
+import { upsertCaWorkHistory, upsertExternalApplicant, logEvent } from '../db/store.js';
 import { caEmails, fetchAllWorkHistory } from './external-apis.js';
 import { normalizeAwlId } from './applicant-db.js';
 
@@ -42,6 +56,7 @@ export async function refreshWorkHistory({
   if (!users.length) return { skipped: 'no_ca_emails', upserted: 0, cas: 0 };
 
   const staffCache = new Map();
+  const bestAssign = new Map(); // awlId -> { caId, omId, clientName, clientEmail, workDate }
   let upserted = 0;
   let resolvedCa = 0;
   let errors = 0;
@@ -82,9 +97,43 @@ export async function refreshWorkHistory({
       });
       upserted += 1;
       if (staff) resolvedCa += 1;
+      // The feed is dynamic: an AWL's client can be shifted to a different CA on a
+      // later day, or handed over part-way through one day. The CURRENT owner is the
+      // CA behind the MOST RECENT activity, so key on date then end/start time (ISO,
+      // so a plain string compare is chronological) - not whichever CA row happened
+      // to be iterated first. An un-rostered email (staff null) is never recorded, so
+      // we never invent a CA.
+      const stamp = `${rec.date}|${rec.end_time || rec.start_time || ''}`;
+      const cur = bestAssign.get(awlId);
+      if (staff?.uuid && (!cur || stamp > cur.stamp)) {
+        bestAssign.set(awlId, {
+          caId: staff.uuid, omId: staff.manager_id ?? null,
+          clientName: rec.client_name, clientEmail: rec.client_email, stamp
+        });
+      }
     }
   }
 
-  await logEvent(null, 'work_history_refreshed', 'system', { from, to, cas: users.length, upserted, resolvedCa, errors });
-  return { from, to, cas: users.length, upserted, resolvedCa, errors };
+  // Visibility-only assignment: point each attributed applicant at the CA who is
+  // actually working them so their dashboard shows the whole book. materialize:
+  // false stores any job links PENDING and creates NO application and NO scan
+  // backlog - the same anti-flood contract buildCaData honours.
+  let applicantsCreated = 0;
+  let applicantsPointed = 0;
+  for (const [awlId, a] of bestAssign) {
+    try {
+      const res = await upsertExternalApplicant({
+        awlId,
+        fullName: a.clientName || awlId,
+        email: a.clientEmail || '',
+        caId: a.caId,
+        opsId: a.omId,
+        materialize: false
+      });
+      if (res.created) applicantsCreated += 1; else applicantsPointed += 1;
+    } catch { /* one bad AWL never aborts the refresh */ }
+  }
+
+  await logEvent(null, 'work_history_refreshed', 'system', { from, to, cas: users.length, upserted, resolvedCa, errors, assigned: bestAssign.size, applicantsCreated, applicantsPointed });
+  return { from, to, cas: users.length, upserted, resolvedCa, errors, assigned: bestAssign.size, applicantsCreated, applicantsPointed };
 }
