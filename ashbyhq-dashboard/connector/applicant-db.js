@@ -172,6 +172,47 @@ export function mapApplicantDoc(doc = {}) {
   return mapped;
 }
 
+/* --------------------- the two-table join (uuid-first) ---------------------
+   A client is identified two ways across the CRM tables: the human AWL-ID
+   (`applywizz_id`) and the machine uuid (`id`), which is unique and NEVER
+   changes for a client. The old join used ONLY applywizz_id, so a
+   client_profiles row carrying the resume but with a blank/mismatched
+   applywizz_id was dropped and the applicant ended up with no resume at all
+   (the AWL-4593 deferral class). These pure helpers make the join uuid-first
+   with applywizz_id as the fallback, and recover the AWL-ID from either side.
+   They are exported so verify:flow can assert all three paths with fixtures -
+   no Postgres pool, no network. */
+
+// Index the clients_additional_info rows on BOTH keys: uuid (authoritative)
+// and normalized AWL-ID (fallback). A blank id/applywizz_id simply isn't added.
+export function indexInfoRows(infos = []) {
+  const byId = new Map();
+  const byAwl = new Map();
+  for (const r of infos) {
+    const id = cell(r?.id);
+    if (id) byId.set(id, r);
+    const awl = r?.applywizz_id ? normalizeAwlId(r.applywizz_id) : '';
+    if (awl) byAwl.set(awl, r);
+  }
+  return { byId, byAwl };
+}
+
+// The info partner for one client_profiles row: a uuid match wins, then the
+// AWL-ID fallback. Returns null for a genuine profile-only row.
+export function matchInfoForProfile(prof, indexes = {}) {
+  const id = cell(prof?.id);
+  if (id && indexes.byId?.has(id)) return indexes.byId.get(id);
+  const awl = prof?.applywizz_id ? normalizeAwlId(prof.applywizz_id) : '';
+  return (awl && indexes.byAwl?.get(awl)) || null;
+}
+
+// The canonical AWL-ID for a joined pair, taken from the profile first and
+// recovered from its uuid-matched info row when the profile has none - so a
+// resume-bearing profile with a blank applywizz_id still lands on its client.
+export function awlForPair(prof, info) {
+  return normalizeAwlId(cell(prof?.applywizz_id) || cell(info?.applywizz_id));
+}
+
 /* ------------------------- Postgres sync ---------------------------- */
 
 async function resolveOpsFromExternal(info) {
@@ -291,17 +332,20 @@ export async function syncFromPostgres({ opsId = null, awlId = null, materialize
       pool.query(`SELECT * FROM ${INFO_TABLE()}${where}`, params)
     ]);
 
-    const infoByAwl = new Map();
-    for (const r of infos) { if (r.applywizz_id) infoByAwl.set(normalizeAwlId(r.applywizz_id), r); }
+    // Join the two tables on the stable uuid FIRST, applywizz_id only as the
+    // fallback, so a resume that lives in a client_profiles row whose
+    // applywizz_id is blank/mismatched is still carried onto its applicant.
+    const indexes = indexInfoRows(infos);
 
     const summary = { seen: 0, created: 0, updated: 0, links: 0, skipped: 0 };
     const seenAwls = new Set();
     for (const cp of profiles) {
-      const awl = cp.applywizz_id ? normalizeAwlId(cp.applywizz_id) : '';
+      const info = matchInfoForProfile(cp, indexes);
+      const awl = awlForPair(cp, info);
       if (!awl) { summary.skipped += 1; continue; }
       seenAwls.add(awl);
       summary.seen += 1;
-      await upsertCombined(cp, infoByAwl.get(awl) || null, { opsId, summary, materialize });
+      await upsertCombined(cp, info || null, { opsId, summary, materialize });
     }
     // Applicants that exist only in the info table (no profile row yet).
     for (const ca of infos) {

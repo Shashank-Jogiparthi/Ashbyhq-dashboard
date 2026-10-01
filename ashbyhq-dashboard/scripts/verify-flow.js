@@ -1341,7 +1341,7 @@ async function verifyCaWorkHistory() {
 async function verifyAssignmentHealth() {
   step('11. Assignment health: no applicant can be silently orphaned (invisible to every CA)');
   const { listUnassignedApplicants, upsertExternalApplicant, upsertApplicantJoblink } = await import('../db/store.js');
-  const { assignmentGapReason } = await import('../connector/applicant-db.js');
+  const { assignmentGapReason, indexInfoRows, matchInfoForProfile, awlForPair, mapCombined } = await import('../connector/applicant-db.js');
   const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
   const appSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'app.js'), 'utf8');
 
@@ -1354,6 +1354,35 @@ async function verifyAssignmentHealth() {
     assignmentGapReason({ inCrm: true, caExtId: 'x', caId: null }) === 'ca_not_rostered');
   check('assignmentGapReason: a CRM row that resolves to a rostered CA is "assigned"',
     assignmentGapReason({ inCrm: true, caExtId: 'x', caId: 'y' }) === 'assigned');
+
+  // ---- the two-table join is uuid-first, so a resume is never lost on a
+  //      blank/mismatched applywizz_id (the AWL-4593 deferral class) ----
+  const JOIN_UUID = 'c1f00000-4593-4593-8593-000000004593';
+  const joinInfos = [
+    { id: JOIN_UUID, applywizz_id: 'AWL-4593', career_associate_id: 'ca-ext-4593' },
+    { id: 'uuid-b', applywizz_id: 'AWL-999' }
+  ];
+  const idx = indexInfoRows(joinInfos);
+  // (1) a resume-bearing profile with NO applywizz_id is matched by uuid and
+  //     its AWL-ID recovered from the info row -> mapCombined carries the resume.
+  const cpBlank = { id: JOIN_UUID, resume_url: 'https://applywizz-prod.s3.amazonaws.com/resumes/4593.pdf' };
+  const infoBlank = matchInfoForProfile(cpBlank, idx);
+  check('a profile with a blank applywizz_id is still joined by its uuid',
+    infoBlank?.applywizz_id === 'AWL-4593' && awlForPair(cpBlank, infoBlank) === 'AWL-4593');
+  check('...and its resume survives the join instead of deferring (AWL-4593 class closed)',
+    mapCombined(cpBlank, infoBlank).awlId === 'AWL-4593'
+    && mapCombined(cpBlank, infoBlank).resumeAddress === cpBlank.resume_url);
+  // (2) uuid is authoritative: it wins even when applywizz_id points elsewhere.
+  const cpCross = { id: JOIN_UUID, applywizz_id: 'AWL-999' };
+  check('the stable uuid beats a mismatched applywizz_id (never re-keys the AWL)',
+    matchInfoForProfile(cpCross, idx)?.id === JOIN_UUID && awlForPair(cpCross, matchInfoForProfile(cpCross, idx)) === 'AWL-999');
+  // (3) applywizz_id stays the fallback when there is no uuid match.
+  check('a profile with no uuid match falls back to the applywizz_id join',
+    matchInfoForProfile({ id: 'unknown-uuid', applywizz_id: 'AWL-999' }, idx)?.applywizz_id === 'AWL-999');
+  // (4) a genuine profile-only row yields null info but keeps its own AWL.
+  const cpOnly = { id: 'uuid-x', applywizz_id: 'AWL-777' };
+  check('a profile-only row (no CRM info) still keeps its own AWL-ID',
+    matchInfoForProfile(cpOnly, idx) === null && awlForPair(cpOnly, null) === 'AWL-777');
 
   // ---- listUnassignedApplicants finds the orphan a silent shell leaves behind ----
   const AWL_ORPH = 'AWL-VERIFY-ORPH';

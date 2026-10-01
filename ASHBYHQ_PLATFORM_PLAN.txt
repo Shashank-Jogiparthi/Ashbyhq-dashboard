@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 264 checks pass.
+CA under them. 269 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1214,7 +1214,7 @@ and let OMs size their own CAs instead, starting at 25.
 verify:flow (step 7) asserts the four rule halves: an assignment is capped by
 the CA's own limit and NOT the manager's; a CA with no explicit limit defaults
 to 25; /api/ops/ca/:uuid/quota enforces the manager_id guard; and the OM
-Overview exposes the editable per-CA limit. 264 checks pass (see §14).
+Overview exposes the editable per-CA limit. 269 checks pass (see §14).
 
 ====================================================================
 14. v3.6a - THE RECORD FILLS WHAT IT HAS, WITHOUT WAITING ON GENAI
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 264 checks pass.
+"…Number" / location box abstains. 269 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,7 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 264 checks pass.
+watchdog kills + frees the slot. 269 checks pass.
 
 ====================================================================
 16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
@@ -1372,7 +1372,7 @@ One consequence the operator accepted: the whitelist also removes the old
 @applywizz.local DEV/admin-style logins. The two real ADMINs (@applywizz.ai)
 always remain, and DEV sign-up stays open, so access is never globally lost -
 but a re-created login should use an @applywizz.com/.ai address to survive the
-next cleanup. 264 checks pass.
+next cleanup. 269 checks pass.
 
 ====================================================================
 18. v3.6e - SIGN-UP MINTS ONLY CA / OM / DEV, NEVER ADMIN
@@ -1406,7 +1406,7 @@ RULE (not a setting), asserted in verify:flow step 8:
     requireRole('admin') - verify asserts no createStaff(...role:'admin') path
     exists outside sign-up.
 
-264 checks pass.
+269 checks pass.
 
 ====================================================================
 19. v3.6f - THE @applywizz.local DOMAIN IS DEAD, EVERYWHERE
@@ -1443,7 +1443,7 @@ rows they owned (12 references - ca_id on rakesh, manager_id on priya.cam, the
 same submissions) survive with only the phantom owner set NULL, 0 applicants
 moved (they were re-pointed in v3.6d), 64 real @applywizz staff and the 2 real
 admins untouched. Nothing recreates them: seedStaffDirectory only upserts roster
-rows, never the fixtures. 264 checks pass.
+rows, never the fixtures. 269 checks pass.
 
 ====================================================================
 20. v3.7 - CA WORK-HISTORY + ca_data (DYNAMIC EXTERNAL APIs, VISIBILITY-ONLY)
@@ -1550,7 +1550,7 @@ local application; and an unset base skips the network entirely. verify:flow ste
 exhaustively, listUnassignedApplicants returns exactly the ca_id-NULL set (and
 drops a row once it has a CA), the resolve route re-syncs from the CRM and never
 calls createStaff, and the link ingest reports unassigned AWLs instead of silently
-accepting a shell. Completed work is committed + pushed by default. 264 checks
+accepting a shell. Completed work is committed + pushed by default. 269 checks
 pass.
 
 ====================================================================
@@ -1569,7 +1569,7 @@ RULE, asserted in verify:flow step 12: the success matcher no longer carries the
 standalone "success" token (only real confirmation phrases), and success is
 declared only once the form's own submit control has disappeared (the structural
 proof the click reached the confirmation) - so the acknowledgement screenshot is
-the post-submit page, never a second pre-submit form. 264 checks pass.
+the post-submit page, never a second pre-submit form. 269 checks pass.
 
 ====================================================================
 22. v3.7b - BLENDED INTO THE PAGE: FINGERPRINT HONESTY + A NAMED "SuS" BLOCK
@@ -1609,7 +1609,7 @@ RULE, asserted in verify:flow step 13 (source inspection, no live run): the engi
 has no DEFAULT_* job/resume constants and no hardcoded userAgent; locale+timezone
 come from the host; humanTypeValue uses a real click (no focus()/trial tell); the
 engine names 'spam-blocked' and files it FAILED 'SuS'; and the worker maps the
-spam block to a terminal FAILED 'SuS'. 264 checks pass.
+spam block to a terminal FAILED 'SuS'. 269 checks pass.
 
 23. v3.7c - WORK-HISTORY DRIVES THE CA ASSIGNMENT (NOT THE AWL'S API KEY)
 
@@ -1658,7 +1658,40 @@ the LATEST CA, a same-day handover resolves by the later end_time (not iteration
 order), refreshWorkHistory reports how many AWLs it assigned, getApplicantsForCa
 surfaces a pending job link (pending_links >= 1) while job_count stays 0, and
 listPendingLinksForCa returns the provided pending link over a CA-role-scoped route.
-264 checks pass.
+269 checks pass.
+
+24. v3.7d - THE TWO-TABLE CRM JOIN IS UUID-FIRST (A RESUME IS NEVER LOST ON A BAD
+      applywizz_id)
+
+  Runs #285/#286 (both AWL-4593, "Bharath Kumar") were deferred on a worker host:
+  applicants.resume_address was "" so resolveResume threw "no resume address", and
+  that host had no CRM connector to fix it. The resume ADDRESS is written ONLY by
+  syncFromPostgres (Path A), which joined client_profiles (the resume lives here:
+  resume_url / google_drive_resume_link / resume_path) onto clients_additional_info
+  strictly on applywizz_id. A client_profiles row that carries the resume but has a
+  blank/mismatched applywizz_id was therefore dropped - the applicant kept no resume
+  and no career_associate_id. clients_additional_info.id is the machine uuid that is
+  unique and never changes for a client, and client_profiles shares it, so the join
+  should key on the uuid and treat applywizz_id as only a fallback.
+
+  THE FIX (connector/applicant-db.js): three pure, exported helpers - indexInfoRows
+  (index infos by uuid id AND normalized applywizz_id), matchInfoForProfile (uuid
+  match wins, then the applywizz_id fallback, null for a profile-only row), and
+  awlForPair (the AWL-ID is taken from the profile first and recovered from its
+  uuid-matched info row when the profile has none). syncFromPostgres now joins with
+  these, so a resume-bearing profile with a blank applywizz_id still lands on its
+  applicant with resume + CA. uuid-first only ADDS matches: when the uuid does not
+  match, behaviour is exactly the old applywizz_id join, and a profile that DOES name
+  its own applywizz_id keeps it (the uuid never re-keys the primary AWL). NOTE: this
+  closes the join on a FULL CRM-connected sync; a per-AWL sync still filters both
+  tables by applywizz_id, so a blank-applywizz_id profile is recovered by the full
+  sync, not the single-AWL path.
+
+RULE, asserted in verify:flow step 11: a profile with a blank applywizz_id is joined
+by its uuid and its resume survives mapCombined (awlId + resumeAddress recovered - the
+AWL-4593 class closed); the stable uuid beats a mismatched applywizz_id without
+re-keying the AWL; a profile with no uuid match falls back to the applywizz_id join;
+and a profile-only row (no CRM info) still keeps its own AWL-ID. 269 checks pass.
 
 END OF CURRENT-STATE DOC (v3.7) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.
