@@ -11,6 +11,8 @@
    Result mapping (read from the engine's job-status JSON after close):
      success        -> SUCCESS
      failed         -> FAILED   (validation banner captured as reason)
+     spam-blocked   -> FAILED "SuS" (Ashby flagged it as possible spam; terminal,
+                     the job link leaves the queue and is NOT auto-retried here)
      unknown        -> PENDING  (submitted, acknowledgement unclear)
      manual-review  -> PENDING  (no submit button; needs a human)
      crash / no-outcome -> FAILED (engine crashed)
@@ -267,14 +269,18 @@ async function launch(app) {
     if (result) {
       const status = String(result.applicationStatus || result.status || '').toLowerCase();
       if (status === 'success') outcome = 'success';
+      else if (status === 'failed' && (result.spamBlocked === true || result.reason === 'SuS')) {
+        // Ashby's anti-spam/security rejection, named by the engine. Filed as a
+        // hard FAILED carrying the short code "SuS" (Suspected Spam) as its
+        // fail_reason, and - unlike a host fault - it is TERMINAL: the row leaves
+        // the queue and is never auto-retried from this same distrusted network.
+        outcome = 'failed'; reason = 'SuS'; flagged = 'spam';
+      }
       else if (status === 'failed') { outcome = 'failed'; reason = result.bannerText || result.reason || 'Validation error'; }
       else if (status === 'unknown' || status === 'manual-review' || status === 'pending') {
         outcome = 'pending';
         reason = status === 'manual-review' ? 'No submit button (manual review)' : 'Outcome unclear';
-        // Ashby's own words beat our guess about an unclear page. The engine only
-        // recognises success and missing-fields, and stores everything else as
-        // 'unknown' WITH the page text - so a red "flagged as possible spam"
-        // banner used to be filed as our not knowing. Name it instead.
+        // Backstop: an older engine that stored the spam banner as 'unknown'.
         const banner = readUnknownBanner(result.bannerText);
         if (banner) { flagged = banner.kind; reason = banner.reason; }
       }
@@ -325,7 +331,7 @@ async function launch(app) {
     try {
       await finishRun(app.id, outcome, { screenshot_path: shots.acknowledgementUrl, screenshots_json: shots.json, reason });
       await logEvent(app.id, flagged ? `run_${flagged}_flagged` : `run_${outcome}`, 'worker', { run_id: runId, reason: reason || null, missing_fields: missingFields, screenshots: shots.meta });
-      if (flagged) console.log(`[run ${app.id}] Ashby outcome named by the banner (${flagged}) - left PENDING for a human, not retried from this host`);
+      if (flagged) console.log(`[run ${app.id}] Ashby outcome named by the banner (${flagged}) - filed ${outcome.toUpperCase()}, not re-queued from this host`);
       // Re-loop: if the run failed because required fields were still blank, the
       // automation had no data to fill them. Surface those exact questions to the
       // CA as blockers and reopen the application to ASSIGNED, so the next apply

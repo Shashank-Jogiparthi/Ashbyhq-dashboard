@@ -1363,6 +1363,46 @@ async function verifySubmissionProof() {
     /'pre-submit'/.test(eng) && /status === 'success'[\s\S]{0,160}application-success/.test(eng));
 }
 
+async function verifyDetectionHardening() {
+  step('13. Detection hardening + spam outcome: no fake fingerprint, and a "SuS" block is terminal');
+  const eng = fs.readFileSync(ENGINE_SCRIPT, 'utf8');
+  const run = fs.readFileSync(RUNNER_SCRIPT, 'utf8');
+
+  // (1) The dead DEFAULT_* constants are gone - a fully dynamic pipeline must
+  // not keep a baked-in job/resume fallback that could apply the wrong person.
+  check('the engine no longer defines or references DEFAULT_JOB_URL / DEFAULT_RESUME_PATH',
+    !/DEFAULT_JOB_URL/.test(eng) && !/DEFAULT_RESUME_PATH/.test(eng));
+
+  // (2) Fingerprint self-consistency: no hardcoded userAgent, and locale/timezone
+  // come from the host instead of a false "America/New_York" that fights the IP.
+  check('no hardcoded userAgent override is left in the engine (real UA matches client hints)',
+    !/userAgent:\s*['"]/.test(eng));
+  check('locale + timezone are pinned to the host, not a fixed America/New_York',
+    /locale:\s*hostLocale\(\)/.test(eng) && /timezoneId:\s*hostTimezone\(\)/.test(eng)
+    && !/timezoneId:\s*'America\/New_York'/.test(eng));
+
+  // (3) Fields get a REAL click-to-focus, not a programmatic focus() + no-op trial.
+  const tvIdx = eng.indexOf('async function humanTypeValue');
+  const tv = tvIdx >= 0 ? eng.slice(tvIdx, eng.indexOf('\nasync function', tvIdx + 10)) : '';
+  check('humanTypeValue focuses with a real click (no locator.focus()/trial:true tell)',
+    /locator\.click\(/.test(tv) && !/\.focus\(\)/.test(tv) && !/trial:\s*true/.test(tv));
+
+  // (4) waitForSubmissionOutcome names the spam/security block explicitly.
+  const woIdx = eng.indexOf('async function waitForSubmissionOutcome');
+  const wo = woIdx >= 0 ? eng.slice(woIdx, eng.indexOf('\nasync function', woIdx + 10)) : '';
+  check('the engine detects an Ashby spam/security block as its own "spam-blocked" outcome',
+    /'spam-blocked'/.test(wo) && /flagged as possible spam/i.test(wo));
+
+  // (5) The engine files that block as FAILED with the short code "SuS".
+  check('a spam block is filed FAILED with reason "SuS" (spamBlocked marker) by the engine',
+    /spam-blocked[\s\S]{0,600}spamBlocked:\s*true[\s\S]{0,200}reason:\s*'SuS'/.test(eng));
+
+  // (6) The worker turns it into a TERMINAL FAILED "SuS" (never re-queued), and a
+  // missing-field failure still reopens while spam does not.
+  check('the worker maps the engine spam block to a terminal FAILED "SuS"',
+    /spamBlocked[\s\S]{0,400}outcome = 'failed'; reason = 'SuS'/.test(run));
+}
+
 async function verifyCrmFetch() {
   step('6. CRM fetch (--crm only; needs the Azure connection)');
   const { isConfigured, syncApplicantByAwl } = await import('../connector/applicant-db.js');
@@ -1391,6 +1431,7 @@ try {
   await verifyCaWorkHistory();
   await verifyAssignmentHealth();
   await verifySubmissionProof();
+  await verifyDetectionHardening();
   if (process.argv.includes('--crm')) await verifyCrmFetch();
 } catch (err) {
   failed += 1;

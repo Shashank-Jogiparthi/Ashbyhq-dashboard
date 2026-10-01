@@ -35,11 +35,26 @@ const APPLY_HEADLESS = process.env.APPLY_HEADLESS === 'true' || process.env.HEAD
 chromium.use(StealthPlugin());
 
 // No silent defaults: the job URL and resume MUST come from the caller
-// (dashboard worker passes argv[2]/argv[3] + RESUME_PATH env). A baked-in
-// personal resume/job constant is a privacy + correctness hazard.
-const DEFAULT_JOB_URL = '';
-const DEFAULT_RESUME_PATH = '';
+// (dashboard worker passes argv[2]/argv[3] + RESUME_PATH env). The former
+// baked-in job/resume "default" constants are gone entirely — a hardcoded
+// personal resume/job constant is a privacy + correctness hazard, and emptying
+// them to '' only left dead fallbacks that mislead readers in a dynamic run.
 const RUN_ID = new Date().toISOString().replace(/[:.]/g, '-');
+
+// Fingerprint consistency: never override the browser with an identity that
+// disagrees with what it actually is. A hardcoded UA ("Chrome/120", Windows)
+// fights the real Sec-CH-UA client hints + navigator.platform the browser
+// reports, and a forced America/New_York timezone fights the host's real
+// geo/IP — both are textbook automation tells Ashby's edge layer scores. So we
+// let the browser keep its genuine UA and pin locale/timezone to THIS host.
+function hostLocale() {
+  try { return Intl.DateTimeFormat().resolvedOptions().locale || 'en-US'; }
+  catch { return 'en-US'; }
+}
+function hostTimezone() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York'; }
+  catch { return 'America/New_York'; }
+}
 
 function parseRuntimeArgs() {
   const args = process.argv.slice(2);
@@ -154,8 +169,6 @@ function isAshbyApplicationUrl(targetUrl = '') {
 
 function resolveResumePath(customPath) {
   if (customPath) return customPath;
-
-  if (DEFAULT_RESUME_PATH && fs.existsSync(DEFAULT_RESUME_PATH)) return DEFAULT_RESUME_PATH;
 
   const found = findLatestResumePath(process.cwd());
   if (found) return found;
@@ -297,8 +310,12 @@ async function humanTypeValue(page, locator, value) {
 
   await moveMouseHumanLike(page, locator, randomDelay(-25, 25), randomDelay(-18, 22));
   await page.waitForTimeout(randomDelay(120, 260));
-  await locator.focus();
-  await locator.click({ trial: true }).catch(() => {});
+  // Real click-to-focus: a genuine forced click puts a trusted pointerdown on the
+  // input, exactly how a person starts typing. The old code focused the field
+  // programmatically and paired it with a no-op "trial" click that dispatches
+  // NOTHING, so every field was focused without a real click - a clear tell.
+  await locator.click({ force: true }).catch(() => {});
+  await page.waitForTimeout(randomDelay(80, 200));
 
   const existingValue = await locator.inputValue().catch(() => '');
   if (existingValue) {
@@ -343,12 +360,27 @@ async function waitForSubmissionOutcome(page) {
   const submitControl = page.locator(
     'button:has-text("Submit Application"), button:has-text("Submit application"), form button[type="submit"]'
   ).first();
+  // Ashby's anti-spam / security rejection. It is neither a success nor a
+  // validation error, and there used to be no branch for it, so the red "flagged
+  // as possible spam" banner fell through to 'unknown' and the dashboard filed a
+  // benign "outcome unclear" for what was actually a hard rejection. Name it here.
+  const blockMessage = page.getByText(
+    /flagged as possible spam|couldn.?t submit your application|submission was flagged|blocked your application|unusual (?:traffic|activity)|access denied|verify you are (?:a )?human|are you a robot|security check|request was blocked/i
+  ).first();
 
   let lastBannerText = '';
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const bannerText = await page.locator('body').textContent().catch(() => '').then((text) => (text || '').trim());
     if (bannerText) {
       lastBannerText = bannerText;
+    }
+
+    // A spam/security block is checked first: it is the most specific and most
+    // important outcome, and its wording can overlap the generic matchers below.
+    if (await blockMessage.isVisible().catch(() => false)) {
+      const blockText = await blockMessage.textContent().catch(() => '') || lastBannerText || 'Submission blocked as possible spam.';
+      console.log(`Submission blocked by Ashby anti-spam/security banner: ${blockText}`);
+      return { status: 'spam-blocked', bannerText: blockText };
     }
 
     if (await validationMessage.isVisible().catch(() => false)) {
@@ -671,9 +703,13 @@ async function fillAshbyForm(jobUrl, resumePath) {
     // of the form. A headless run has no window at all, so give it a
     // desktop-sized viewport - the form's lazy sections only render on-screen.
     viewport: APPLY_HEADLESS ? { width: 1366, height: 900 } : null,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    locale: 'en-US',
-    timezoneId: 'America/New_York'
+    // No userAgent override: the browser reports its OWN genuine UA, which is the
+    // only value consistent with its Sec-CH-UA client hints and navigator.platform
+    // (a hardcoded "Chrome/120 / Windows" string contradicts both and is a blatant
+    // automation tell). Locale + timezone are pinned to this host so they agree
+    // with the real geo/IP instead of falsely claiming America/New_York.
+    locale: hostLocale(),
+    timezoneId: hostTimezone()
   });
 
   const page = await context.newPage();
@@ -789,6 +825,14 @@ async function fillAshbyForm(jobUrl, resumePath) {
       const successPath = await captureStageScreenshot(page, 'application-success', '', applicantId, jobUrl);
       saveJobStatus(applicantId, jobUrl, 'success', { applicationStatus: 'success', screenshot: successPath, preSubmitScreenshot: preSubmitPath, bannerText: submissionOutcome.bannerText, profile: applicantProfile });
       console.log('Application submitted successfully and acknowledgement captured.');
+    } else if (submissionOutcome.status === 'spam-blocked') {
+      // Ashby refused the submission as possible spam. This is a hard FAILED with
+      // the short code "SuS" (Suspected Spam), NOT an unclear outcome and NOT
+      // something to retry: the worker keeps it terminal so the job link leaves
+      // the queue instead of being re-run from the same distrusted network.
+      const blockPath = await captureStageScreenshot(page, 'application-spam-blocked', '', applicantId, jobUrl);
+      saveJobStatus(applicantId, jobUrl, 'failed', { applicationStatus: 'failed', spamBlocked: true, reason: 'SuS', screenshot: blockPath, preSubmitScreenshot: preSubmitPath, bannerText: submissionOutcome.bannerText, profile: applicantProfile });
+      console.log('Submission was flagged as possible spam — filed FAILED (SuS), not re-queued.');
     } else if (submissionOutcome.status === 'missing-fields') {
       const failPath = await captureStageScreenshot(page, 'application-missing-fields', '', applicantId, jobUrl);
       saveJobStatus(applicantId, jobUrl, 'failed', { applicationStatus: 'failed', screenshot: failPath, preSubmitScreenshot: preSubmitPath, bannerText: submissionOutcome.bannerText, missingFields: readiness.requiredUnfilled, profile: applicantProfile });
@@ -827,9 +871,10 @@ async function scanApplicationForm(jobUrl) {
     // viewport:null fills a real maximised window; headless has no window, so
     // give it a desktop-sized one (lazy sections must still render).
     viewport: headless ? { width: 1366, height: 900 } : null,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    locale: 'en-US',
-    timezoneId: 'America/New_York'
+    // Same rule as the apply path: keep the browser's genuine UA (consistent with
+    // its client hints + platform) and pin locale/timezone to this host.
+    locale: hostLocale(),
+    timezoneId: hostTimezone()
   });
   const page = await context.newPage();
   try {
@@ -900,12 +945,12 @@ async function runApplicantsInParallel(applicantRecords = []) {
     return [];
   }
 
-  const jobUrl = RUNTIME_ARGS.jobUrl || DEFAULT_JOB_URL;
+  const jobUrl = RUNTIME_ARGS.jobUrl;
   if (!jobUrl) throw new Error('No job URL provided (pass argv[2] or set JOB_URL).');
   const tasks = applicantRecords.map((record) => {
     const normalized = normalizeApplicantPayload(record);
     const applicantId = resolveApplicantIdFromResume(normalized, '', jobUrl);
-    const resumePath = record.resume_path || record.resume_url || resolveResumePath(RUNTIME_ARGS.resumePath || process.argv[3]) || DEFAULT_RESUME_PATH;
+    const resumePath = record.resume_path || record.resume_url || resolveResumePath(RUNTIME_ARGS.resumePath || process.argv[3]);
     if (!resumePath) throw new Error(`No resume resolved for ${applicantId || 'applicant'} (pass argv[3] or set RESUME_PATH).`);
     return fillAshbyForm(jobUrl, resumePath).catch((error) => ({
       applicantId,

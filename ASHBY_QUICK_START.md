@@ -410,7 +410,7 @@ has to open the URL to learn why there is nothing to fill.
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 247 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 254 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits
@@ -432,6 +432,9 @@ npm run verify:flow   # 247 assertions: gate per mode, defer/refund, hand-back +
                       # from the CRM and never invents a CA); and submission proof
                       # (the acknowledgement shot is the POST-submit confirmation,
                       # never a second pre-submit form - success needs the form gone)
+                      # and detection hardening (no DEFAULT job/resume, no fake UA,
+                      # host locale/timezone, real click-to-focus; an Ashby spam block
+                      # is named and filed a TERMINAL FAILED "SuS", never re-queued)
 ```
 
 ---
