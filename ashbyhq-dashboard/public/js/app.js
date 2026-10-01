@@ -835,9 +835,11 @@ async function renderCaSummaryInto(pane, caUuid) {
   const apRows = d.applicants.map((ap) => {
     const mine = d.applications.filter((x) => x.awl_id === ap.awl_id);
     const applied = mine.filter((x) => x.status === 'SUCCESS').length;
+    const pending = ap.pending_links ?? 0;
     return [`<a href="#" data-client-awl="${esc(ap.awl_id)}" class="mono">${esc(ap.awl_id)}</a>`,
       esc(ap.full_name), esc(ap.email), esc(ap.am_name || '—'),
-      ap.job_count, `${applied}/${mine.length}`];
+      ap.job_count, `${applied}/${mine.length}`,
+      pending ? `<span class="chip PENDING">${pending} waiting</span>` : '0'];
   });
   pane.innerHTML = `
     <div class="card" style="margin-bottom:14px;">
@@ -848,8 +850,8 @@ async function renderCaSummaryInto(pane, caUuid) {
     </div>
     ${statsHtml(d.counters)}
     <h3>Applicants (${d.applicants.length})</h3>
-    <p class="muted">Click a client (an AWL-ID) to load just their applications, each with the job link and the run screenshots.</p>
-    ${tableHtml(['AWL-ID', 'Name', 'Email', 'AM', 'Jobs', 'Applied'], apRows)}
+    <p class="muted">Click a client (an AWL-ID) to load just their applications, each with the job link and the run screenshots. <b>Pending links</b> are job links assigned to this client that are waiting to be queued - a work-history refresh only makes them visible here, it never auto-queues an application.</p>
+    ${tableHtml(['AWL-ID', 'Name', 'Email', 'AM', 'Queued', 'Applied', 'Pending links'], apRows)}
     <h3 id="ca-apps-head" style="margin-top:20px;">Applications (${d.applications.length})</h3>
     <div id="ca-apps-list">${appsHtml(null)}</div>
     <h3 style="margin-top:20px;">Recent activity</h3>

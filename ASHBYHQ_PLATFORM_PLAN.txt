@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 260 checks pass.
+CA under them. 262 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1214,7 +1214,7 @@ and let OMs size their own CAs instead, starting at 25.
 verify:flow (step 7) asserts the four rule halves: an assignment is capped by
 the CA's own limit and NOT the manager's; a CA with no explicit limit defaults
 to 25; /api/ops/ca/:uuid/quota enforces the manager_id guard; and the OM
-Overview exposes the editable per-CA limit. 260 checks pass (see §14).
+Overview exposes the editable per-CA limit. 262 checks pass (see §14).
 
 ====================================================================
 14. v3.6a - THE RECORD FILLS WHAT IT HAS, WITHOUT WAITING ON GENAI
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 260 checks pass.
+"…Number" / location box abstains. 262 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,7 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 260 checks pass.
+watchdog kills + frees the slot. 262 checks pass.
 
 ====================================================================
 16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
@@ -1372,7 +1372,7 @@ One consequence the operator accepted: the whitelist also removes the old
 @applywizz.local DEV/admin-style logins. The two real ADMINs (@applywizz.ai)
 always remain, and DEV sign-up stays open, so access is never globally lost -
 but a re-created login should use an @applywizz.com/.ai address to survive the
-next cleanup. 260 checks pass.
+next cleanup. 262 checks pass.
 
 ====================================================================
 18. v3.6e - SIGN-UP MINTS ONLY CA / OM / DEV, NEVER ADMIN
@@ -1406,7 +1406,7 @@ RULE (not a setting), asserted in verify:flow step 8:
     requireRole('admin') - verify asserts no createStaff(...role:'admin') path
     exists outside sign-up.
 
-260 checks pass.
+262 checks pass.
 
 ====================================================================
 19. v3.6f - THE @applywizz.local DOMAIN IS DEAD, EVERYWHERE
@@ -1443,7 +1443,7 @@ rows they owned (12 references - ca_id on rakesh, manager_id on priya.cam, the
 same submissions) survive with only the phantom owner set NULL, 0 applicants
 moved (they were re-pointed in v3.6d), 64 real @applywizz staff and the 2 real
 admins untouched. Nothing recreates them: seedStaffDirectory only upserts roster
-rows, never the fixtures. 260 checks pass.
+rows, never the fixtures. 262 checks pass.
 
 ====================================================================
 20. v3.7 - CA WORK-HISTORY + ca_data (DYNAMIC EXTERNAL APIs, VISIBILITY-ONLY)
@@ -1550,7 +1550,7 @@ local application; and an unset base skips the network entirely. verify:flow ste
 exhaustively, listUnassignedApplicants returns exactly the ca_id-NULL set (and
 drops a row once it has a CA), the resolve route re-syncs from the CRM and never
 calls createStaff, and the link ingest reports unassigned AWLs instead of silently
-accepting a shell. Completed work is committed + pushed by default. 260 checks
+accepting a shell. Completed work is committed + pushed by default. 262 checks
 pass.
 
 ====================================================================
@@ -1569,7 +1569,7 @@ RULE, asserted in verify:flow step 12: the success matcher no longer carries the
 standalone "success" token (only real confirmation phrases), and success is
 declared only once the form's own submit control has disappeared (the structural
 proof the click reached the confirmation) - so the acknowledgement screenshot is
-the post-submit page, never a second pre-submit form. 260 checks pass.
+the post-submit page, never a second pre-submit form. 262 checks pass.
 
 ====================================================================
 22. v3.7b - BLENDED INTO THE PAGE: FINGERPRINT HONESTY + A NAMED "SuS" BLOCK
@@ -1609,7 +1609,7 @@ RULE, asserted in verify:flow step 13 (source inspection, no live run): the engi
 has no DEFAULT_* job/resume constants and no hardcoded userAgent; locale+timezone
 come from the host; humanTypeValue uses a real click (no focus()/trial tell); the
 engine names 'spam-blocked' and files it FAILED 'SuS'; and the worker maps the
-spam block to a terminal FAILED 'SuS'. 260 checks pass.
+spam block to a terminal FAILED 'SuS'. 262 checks pass.
 
 23. v3.7c - WORK-HISTORY DRIVES THE CA ASSIGNMENT (NOT THE AWL'S API KEY)
 
@@ -1636,12 +1636,21 @@ spam block to a terminal FAILED 'SuS'. 260 checks pass.
   return + work_history_refreshed log now carry assigned / applicantsCreated /
   applicantsPointed; the DEV refresh toast surfaces "N AWLs assigned to their CA".
 
+  READ SIDE (why the CA still saw "0"): the dashboard counters are computed from
+  the applications table, and a visibility-only refresh creates NO applications, so
+  a freshly-pointed CA correctly shows TOTAL/ASSIGNED 0 even though their applicants
+  list is now populated. To stop that looking like "nothing assigned", getApplicantsForCa
+  now also returns pending_links (applicant_joblinks WHERE materialized = 0) and the
+  CA Applicants table shows a "Pending links" column ("N waiting"), so assigned-but-
+  not-yet-queued job links are visible without ever auto-queuing them.
+
 RULE, asserted in verify:flow step 10: a CRM-unresolvable AWL that appears ONLY in
 the work-history feed is pointed at that feed's resolved CA uuid + OM, the pointing
 creates NO application, an un-rostered work-history email never invents an
 assignment (ca_id stays NULL), a client shifted to another CA the next day follows
 the LATEST CA, a same-day handover resolves by the later end_time (not iteration
-order), and refreshWorkHistory reports how many AWLs it assigned. 260 checks pass.
+order), refreshWorkHistory reports how many AWLs it assigned, and getApplicantsForCa
+surfaces a pending job link (pending_links >= 1) while job_count stays 0. 262 checks pass.
 
 END OF CURRENT-STATE DOC (v3.7) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

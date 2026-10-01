@@ -303,7 +303,8 @@ export async function destroySession(token) {
 export async function getApplicantsForCa(caUuid) {
   return db.prepare(`
     SELECT ap.*, am.name AS am_name, s.name AS ca_name, m.name AS manager_name,
-      (SELECT COUNT(*) FROM applications a WHERE a.awl_id = ap.awl_id) AS job_count
+      (SELECT COUNT(*) FROM applications a WHERE a.awl_id = ap.awl_id) AS job_count,
+      (SELECT COUNT(*) FROM applicant_joblinks jl WHERE jl.awl_id = ap.awl_id AND jl.materialized = 0) AS pending_links
     FROM applicants ap
     LEFT JOIN ams am ON am.uuid = ap.am_id
     LEFT JOIN staff s ON s.uuid = ap.ca_id

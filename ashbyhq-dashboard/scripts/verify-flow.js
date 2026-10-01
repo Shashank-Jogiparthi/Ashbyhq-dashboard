@@ -56,7 +56,7 @@ import {
   purgeApplicantFormData, applicantNeedsProfile, logEvent, upsertFieldAnswer,
   listFieldAnswers, hasBlockingMissingFacts, saveJobLinkFields, applyCaEdits,
   handBackToQueue, listQueuedForWorker, claimForRun,
-  setLinkUnavailable, getJobLinkByUrl
+  setLinkUnavailable, getJobLinkByUrl, getApplicantsForCa
 } from '../db/store.js';
 import { scanStateForUrl } from '../worker/link-scanner.js';
 import { browserState, canDriveBrowsers } from '../core/browser-check.js';
@@ -893,7 +893,9 @@ async function verifyStaffDirectory() {
   // re-point keeps SUCCESS rows as history rather than rewriting them.
   const storeSrc = fs.readFileSync(STORE_SCRIPT, 'utf8');
   check('a CA sign-in sees exactly their own AWL-IDs (WHERE ap.ca_id = ?)',
-    /getApplicantsForCa[\s\S]{0,400}WHERE ap\.ca_id = \?/.test(storeSrc));
+    /getApplicantsForCa[\s\S]{0,600}WHERE ap\.ca_id = \?/.test(storeSrc));
+  check('a CA sign-in also surfaces the PENDING job links waiting to be queued',
+    /getApplicantsForCa[\s\S]{0,600}applicant_joblinks jl WHERE jl\.awl_id = ap\.awl_id AND jl\.materialized = 0[\s\S]{0,40}AS pending_links/.test(storeSrc));
   check('an OM sign-in sees only the clients of CAs under them (WHERE s.manager_id = ?)',
     /getApplicantsForManager[\s\S]{0,400}WHERE s\.manager_id = \?/.test(storeSrc));
   check('client details carry the handling CA + OM (ca_name / manager_name)',
@@ -1209,6 +1211,12 @@ async function verifyCaWorkHistory() {
     const noLink = !(await db.prepare('SELECT id FROM job_links WHERE url = ?').get(URL_VIS));
     const noAppVis = Number((await db.prepare('SELECT COUNT(1) AS n FROM applications WHERE awl_id = ?').get(AWL_VIS))?.n || 0) === 0;
     check('materialize:false adds a pending link but creates NO job_links/application', pend.materialized === false && noLink && noAppVis);
+    // The CA read path must surface that pending link as assigned-but-unqueued work
+    // (job_count stays 0 - nothing was auto-queued).
+    const caBook = await getApplicantsForCa(TESTCA_UUID);
+    const bookVis = caBook.find((x) => x.awl_id === AWL_VIS);
+    check('getApplicantsForCa surfaces the pending job link while job_count stays 0 (never auto-queued)',
+      !!bookVis && Number(bookVis.pending_links) >= 1 && Number(bookVis.job_count) === 0);
     // control: materialize:true DOES create one (proves the flag is the gate)
     await upsertExternalApplicant({ awlId: AWL_GUARD, fullName: 'WH Guard', email: '', caId: TESTCA_UUID, opsId: balajiUuid, materialize: false });
     const mat = await upsertApplicantJoblink(AWL_GUARD, { url: URL_G, materialize: true });
