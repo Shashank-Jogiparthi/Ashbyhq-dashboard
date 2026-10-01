@@ -56,7 +56,7 @@ import {
   purgeApplicantFormData, applicantNeedsProfile, logEvent, upsertFieldAnswer,
   listFieldAnswers, hasBlockingMissingFacts, saveJobLinkFields, applyCaEdits,
   handBackToQueue, listQueuedForWorker, claimForRun,
-  setLinkUnavailable, getJobLinkByUrl, getApplicantsForCa
+  setLinkUnavailable, getJobLinkByUrl, getApplicantsForCa, listPendingLinksForCa
 } from '../db/store.js';
 import { scanStateForUrl } from '../worker/link-scanner.js';
 import { browserState, canDriveBrowsers } from '../core/browser-check.js';
@@ -1217,6 +1217,12 @@ async function verifyCaWorkHistory() {
     const bookVis = caBook.find((x) => x.awl_id === AWL_VIS);
     check('getApplicantsForCa surfaces the pending job link while job_count stays 0 (never auto-queued)',
       !!bookVis && Number(bookVis.pending_links) >= 1 && Number(bookVis.job_count) === 0);
+    // The CA dashboard's own read path must list the actual pending link URL.
+    const caPending = await listPendingLinksForCa(TESTCA_UUID);
+    check('listPendingLinksForCa returns the provided pending link for the CA (scoped to their book)',
+      caPending.some((l) => l.awl_id === AWL_VIS && l.url === URL_VIS));
+    check('the CA pending-links route is scoped to the CA role',
+      /app\.get\('\/api\/ca\/pending-links'[^)]*requireRole\('ca'\)[\s\S]{0,160}listPendingLinksForCa\(req\.user\.uuid\)/.test(fs.readFileSync(SERVER_SCRIPT, 'utf8')));
     // control: materialize:true DOES create one (proves the flag is the gate)
     await upsertExternalApplicant({ awlId: AWL_GUARD, fullName: 'WH Guard', email: '', caId: TESTCA_UUID, opsId: balajiUuid, materialize: false });
     const mat = await upsertApplicantJoblink(AWL_GUARD, { url: URL_G, materialize: true });

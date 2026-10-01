@@ -20,6 +20,7 @@ import {
   destroySession,
   getApplicantsForCa,
   getApplicantsForManager,
+  listPendingLinksForCa,
   getApplicantsAll,
   getApplications,
   getApplicationById,
@@ -336,6 +337,12 @@ app.get('/api/ca/applicants', requireAuth, requireRole('ca', 'ops', 'dev', 'admi
 
 app.get('/api/ca/applications', requireAuth, wrap(async (req) => ({
   applications: await getApplications(req.user, { status: req.query.status || null, awlId: req.query.awlId || null })
+})));
+
+// The job links an operator provided for this CA's clients that are still pending
+// (never auto-queued). Read-only visibility so the CA can see their assigned links.
+app.get('/api/ca/pending-links', requireAuth, requireRole('ca'), wrap(async (req) => ({
+  links: await listPendingLinksForCa(req.user.uuid)
 })));
 
 app.get('/api/applications/:id', requireAuth, wrap(async (req) => {

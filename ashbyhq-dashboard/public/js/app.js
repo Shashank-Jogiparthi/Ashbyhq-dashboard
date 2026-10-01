@@ -234,10 +234,13 @@ function tableHtml(headers, rows) {
 /* --------------------- applicants + CA queue ----------------------- */
 
 async function renderApplicantsTab() {
-  const [{ applicants }, { applications }] = await Promise.all([
-    api('/api/ca/applicants'),
-    api('/api/ca/applications')
-  ]);
+  const isCa = ME.role === 'ca';
+  const reqs = [api('/api/ca/applicants'), api('/api/ca/applications')];
+  if (isCa) reqs.push(api('/api/ca/pending-links').catch(() => ({ links: [] })));
+  const [apRes, appsRes, pendRes] = await Promise.all(reqs);
+  const applicants = apRes.applicants;
+  const applications = appsRes.applications;
+  const pendingLinks = pendRes?.links || [];
 
   if (ME.role === 'ca') {
     $('view').innerHTML = `
@@ -251,10 +254,10 @@ async function renderApplicantsTab() {
         <div id="queue-pane"><p class="muted">Select an applicant to see their assigned job links.</p></div>
       </div>`;
     const state = { selected: applicants[0]?.awl_id || null, query: '' };
-    const draw = () => drawDirectory(state, applicants, applications);
+    const draw = () => drawDirectory(state, applicants, applications, pendingLinks);
     draw();
     $('dir-search').addEventListener('input', (e) => { state.query = e.target.value.toLowerCase(); draw(); });
-    if (state.selected) drawQueue(state.selected, applications);
+    if (state.selected) drawQueue(state.selected, applications, pendingLinks);
     window.__awlRefreshTab = () => openTab('applicants');
     return;
   }
@@ -276,35 +279,45 @@ function countersFrom(applications) {
   return c;
 }
 
-function drawDirectory(state, applicants, applications) {
+function drawDirectory(state, applicants, applications, pendingLinks = []) {
   const list = applicants.filter((a) =>
     !state.query || a.full_name.toLowerCase().includes(state.query) || a.awl_id.toLowerCase().includes(state.query));
   $('dir-list').innerHTML = list.map((a) => {
     const mine = applications.filter((x) => x.awl_id === a.awl_id);
     const applied = mine.filter((x) => x.status === 'SUCCESS').length;
+    const waiting = pendingLinks.filter((l) => l.awl_id === a.awl_id).length || (a.pending_links || 0);
     return `<div class="card ap-card ${state.selected === a.awl_id ? 'selected' : ''}" data-awl="${esc(a.awl_id)}">
       <div class="row"><span class="mono">${esc(a.awl_id)}</span>
-        <span class="chip">${mine.length} Jobs</span></div>
+        <span>${mine.length ? `<span class="chip">${mine.length} Jobs</span> ` : ''}${waiting ? `<span class="chip PENDING">${waiting} waiting</span>` : (!mine.length ? '<span class="chip">0 Jobs</span>' : '')}</span></div>
       <h3>${esc(a.full_name)}</h3>
       <div class="muted">${esc(a.email)}</div>
       <div class="muted">AM: <b>${esc(a.am_name || '—')}</b>${a.manager_name ? ` · under OPS ${esc(a.manager_name)}` : ''}</div>
-      <div class="muted">${applied}/${mine.length} applied</div>
+      <div class="muted">${applied}/${mine.length} applied${waiting ? ` · ${waiting} link(s) to queue` : ''}</div>
     </div>`;
   }).join('') || '<p class="muted">No applicants match.</p>';
   $('dir-list').querySelectorAll('.ap-card').forEach((card) => {
     card.addEventListener('click', () => {
       state.selected = card.dataset.awl;
-      drawDirectory(state, applicants, applications);
-      drawQueue(state.selected, applications);
+      drawDirectory(state, applicants, applications, pendingLinks);
+      drawQueue(state.selected, applications, pendingLinks);
     });
   });
 }
 
-function drawQueue(awlId, applications) {
+function drawQueue(awlId, applications, pendingLinks = []) {
   const mine = applications.filter((a) => a.awl_id === awlId);
+  const pending = pendingLinks.filter((l) => l.awl_id === awlId);
   const isCa = ME.role === 'ca';
+  const pendingHtml = pending.length ? `
+    <h4 style="margin:14px 0 6px;">🔗 Job links waiting to be queued (${pending.length})</h4>
+    <p class="muted small">Provided for this client but not yet turned into an application - the refresh never auto-queues them.</p>
+    ${pending.map((l) => `<div class="card queue-card">
+      <div class="head"><b>${esc(l.company || 'Job link')}</b>${l.title ? ` — ${esc(l.title)}` : ''} <span class="chip PENDING">pending</span></div>
+      <div class="muted"><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.url)}</a></div>
+    </div>`).join('')}` : '';
   $('queue-pane').innerHTML = `<h3 style="margin:4px 0;">📋 Assigned Applications Queue — <span class="mono">${esc(awlId)}</span></h3>` +
-    (mine.length ? mine.map((a) => queueCard(a, isCa)).join('') : '<p class="muted">No job links assigned yet.</p>');
+    (mine.length ? mine.map((a) => queueCard(a, isCa)).join('') : '<p class="muted">No applications queued yet.</p>') +
+    pendingHtml;
 
   mine.forEach((a) => {
     const applyBtn = $(`apply-${a.id}`);

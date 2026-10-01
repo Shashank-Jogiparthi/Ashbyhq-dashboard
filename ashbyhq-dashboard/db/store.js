@@ -314,6 +314,21 @@ export async function getApplicantsForCa(caUuid) {
   `).all(caUuid);
 }
 
+// The actual job links an operator has provided for a CA's clients that are still
+// PENDING (stored in applicant_joblinks with materialized = 0, i.e. never turned
+// into an application). Read-only: a visibility-only work-history refresh stores
+// these but never queues them, so the CA dashboard shows them as "waiting" so the
+// provided links are visible without ever auto-creating an application.
+export async function listPendingLinksForCa(caUuid) {
+  return db.prepare(`
+    SELECT jl.awl_id, jl.url, jl.company, jl.title, jl.added_at
+    FROM applicant_joblinks jl
+    JOIN applicants ap ON ap.awl_id = jl.awl_id
+    WHERE ap.ca_id = ? AND jl.materialized = 0
+    ORDER BY jl.awl_id, jl.added_at
+  `).all(caUuid);
+}
+
 export async function getApplicantsForManager(managerUuid) {
   return db.prepare(`
     SELECT ap.*, am.name AS am_name, s.name AS ca_name, m.name AS manager_name,
