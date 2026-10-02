@@ -137,6 +137,18 @@ CREATE INDEX IF NOT EXISTS idx_applicants_ca  ON applicants(ca_id);
 CREATE INDEX IF NOT EXISTS idx_applicants_ops ON applicants(ops_id);
 CREATE INDEX IF NOT EXISTS idx_applicants_email ON applicants(email);
 
+-- Mirror of an applicant's CRM/S3 resume into Supabase Storage, so the Railway
+-- worker (S3-IP-refused) can still fetch it. Reused across syncs while the
+-- external source_url is unchanged. Standalone (no FK) by design.
+CREATE TABLE IF NOT EXISTS resume_mirrors (
+  awl_id      TEXT PRIMARY KEY,
+  source_url  TEXT NOT NULL,
+  cdn_url     TEXT NOT NULL,
+  token       TEXT,
+  bytes       INTEGER NOT NULL DEFAULT 0,
+  mirrored_at TEXT NOT NULL
+);
+
 -- (AWL-ID -> link) pairs queued to become applications on CA assignment.
 CREATE TABLE IF NOT EXISTS applicant_joblinks (
   id           INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

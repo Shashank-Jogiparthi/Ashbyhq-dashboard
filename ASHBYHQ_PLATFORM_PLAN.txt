@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 269 checks pass.
+CA under them. 283 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 269 checks pass.
+"…Number" / location box abstains. 283 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,7 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 269 checks pass.
+watchdog kills + frees the slot. 283 checks pass.
 
 ====================================================================
 16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
@@ -1372,7 +1372,7 @@ One consequence the operator accepted: the whitelist also removes the old
 @applywizz.local DEV/admin-style logins. The two real ADMINs (@applywizz.ai)
 always remain, and DEV sign-up stays open, so access is never globally lost -
 but a re-created login should use an @applywizz.com/.ai address to survive the
-next cleanup. 269 checks pass.
+next cleanup. 283 checks pass.
 
 ====================================================================
 18. v3.6e - SIGN-UP MINTS ONLY CA / OM / DEV, NEVER ADMIN
@@ -1406,7 +1406,7 @@ RULE (not a setting), asserted in verify:flow step 8:
     requireRole('admin') - verify asserts no createStaff(...role:'admin') path
     exists outside sign-up.
 
-269 checks pass.
+283 checks pass.
 
 ====================================================================
 19. v3.6f - THE @applywizz.local DOMAIN IS DEAD, EVERYWHERE
@@ -1443,7 +1443,7 @@ rows they owned (12 references - ca_id on rakesh, manager_id on priya.cam, the
 same submissions) survive with only the phantom owner set NULL, 0 applicants
 moved (they were re-pointed in v3.6d), 64 real @applywizz staff and the 2 real
 admins untouched. Nothing recreates them: seedStaffDirectory only upserts roster
-rows, never the fixtures. 269 checks pass.
+rows, never the fixtures. 283 checks pass.
 
 ====================================================================
 20. v3.7 - CA WORK-HISTORY + ca_data (DYNAMIC EXTERNAL APIs, VISIBILITY-ONLY)
@@ -1550,7 +1550,7 @@ local application; and an unset base skips the network entirely. verify:flow ste
 exhaustively, listUnassignedApplicants returns exactly the ca_id-NULL set (and
 drops a row once it has a CA), the resolve route re-syncs from the CRM and never
 calls createStaff, and the link ingest reports unassigned AWLs instead of silently
-accepting a shell. Completed work is committed + pushed by default. 269 checks
+accepting a shell. Completed work is committed + pushed by default. 283 checks
 pass.
 
 ====================================================================
@@ -1569,7 +1569,7 @@ RULE, asserted in verify:flow step 12: the success matcher no longer carries the
 standalone "success" token (only real confirmation phrases), and success is
 declared only once the form's own submit control has disappeared (the structural
 proof the click reached the confirmation) - so the acknowledgement screenshot is
-the post-submit page, never a second pre-submit form. 269 checks pass.
+the post-submit page, never a second pre-submit form. 283 checks pass.
 
 ====================================================================
 22. v3.7b - BLENDED INTO THE PAGE: FINGERPRINT HONESTY + A NAMED "SuS" BLOCK
@@ -1609,7 +1609,7 @@ RULE, asserted in verify:flow step 13 (source inspection, no live run): the engi
 has no DEFAULT_* job/resume constants and no hardcoded userAgent; locale+timezone
 come from the host; humanTypeValue uses a real click (no focus()/trial tell); the
 engine names 'spam-blocked' and files it FAILED 'SuS'; and the worker maps the
-spam block to a terminal FAILED 'SuS'. 269 checks pass.
+spam block to a terminal FAILED 'SuS'. 283 checks pass.
 
 23. v3.7c - WORK-HISTORY DRIVES THE CA ASSIGNMENT (NOT THE AWL'S API KEY)
 
@@ -1658,7 +1658,7 @@ the LATEST CA, a same-day handover resolves by the later end_time (not iteration
 order), refreshWorkHistory reports how many AWLs it assigned, getApplicantsForCa
 surfaces a pending job link (pending_links >= 1) while job_count stays 0, and
 listPendingLinksForCa returns the provided pending link over a CA-role-scoped route.
-269 checks pass.
+283 checks pass.
 
 24. v3.7d - THE TWO-TABLE CRM JOIN IS UUID-FIRST (A RESUME IS NEVER LOST ON A BAD
       applywizz_id)
@@ -1691,7 +1691,47 @@ RULE, asserted in verify:flow step 11: a profile with a blank applywizz_id is jo
 by its uuid and its resume survives mapCombined (awlId + resumeAddress recovered - the
 AWL-4593 class closed); the stable uuid beats a mismatched applywizz_id without
 re-keying the AWL; a profile with no uuid match falls back to the applywizz_id join;
-and a profile-only row (no CRM info) still keeps its own AWL-ID. 269 checks pass.
+and a profile-only row (no CRM info) still keeps its own AWL-ID. 283 checks pass.
+
+25. v3.7e - THE RESUME IS MIRRORED INTO SUPABASE SO RAILWAY CAN FETCH IT
+
+  After the connector was wired, AWL-4593 stopped deferring and instead failed on
+  the CA dashboard: "Resume unavailable: download 403". The resume ADDRESS is now
+  correct - applicants.resume_address holds the CRM's public applywizz-prod S3
+  link, and that exact URL returns 200 from an ordinary network but 403 from the
+  Railway worker. So it is not our code, the connector or the link - the S3 bucket
+  refuses Railway's egress IP specifically, and the PDF bytes live ONLY in that
+  bucket. client_profiles (and the get-client-details API, which returns the same
+  resume_url) carry no file, just the pointer, so reading the resume location
+  through the CRM/ API cannot dodge an IP block on the download itself.
+
+  THE FIX (connector/resume-store.js): while a CRM sync runs on a host the bucket
+  DOES allow (the office / sync host - the resume downloads there), stageResumeForAwl
+  downloads the resume and re-hosts it in OUR Supabase Storage, then repoints
+  applicants.resume_address at that copy. Both the apply worker and the draft
+  resume-text reader read that SAME column, so once it holds a Supabase URL every
+  Railway-side fetch succeeds (Supabase is the store Railway already reaches for
+  screenshots). The resume SOURCE is tried in the agreed order - the client-details
+  API first, then the CRM-table value, and only when NEITHER yields a link is it an
+  honest "no_resume_source" acknowledgement. Mirrors are keyed by AWL in the new
+  resume_mirrors table (source_url / cdn_url / token): a re-sync whose source is
+  unchanged RESTORES the cached copy instead of re-downloading, an object key carries
+  a random token so a sequential AWL-id cannot be enumerated, and a download/upload
+  failure NEVER clobbers the applicant's existing pointer. It is wired into
+  /api/dev/sync + /api/dev/sync-one best-effort (a mirror error is reported, never
+  fatal to the sync) plus a DEV/ADMIN /api/dev/resumes/stage route for on-demand
+  re-staging. NOTE: this stores applicant resume PDFs at rest in Supabase (the same
+  public bucket as screenshots) - a deliberate change from the URL-only posture, so
+  only resume-bearing applicants are mirrored and the token keeps them un-enumerable.
+
+RULE, asserted in verify:flow step 14: isOurCdnUrl recognises a Supabase URL and
+never the raw S3 link; a mirror prefers the API source over the stored table link,
+re-hosts it and repoints resume_address; a re-sync with the same source reuses the
+copy (no re-download) and a clobbered pointer is restored from cache; with no API
+resume it falls back to the table (via 'table'); a 403 download is reported and the
+pointer left intact; and no source at all is an honest no_resume_source - plus the
+sync / sync-one / DEV route wiring and the resume_mirrors schema on both dialects.
+283 checks pass.
 
 END OF CURRENT-STATE DOC (v3.7) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

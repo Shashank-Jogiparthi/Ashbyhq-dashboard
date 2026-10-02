@@ -410,7 +410,7 @@ has to open the URL to learn why there is nothing to fill.
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 269 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 283 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits
@@ -434,7 +434,13 @@ npm run verify:flow   # 269 assertions: gate per mode, defer/refund, hand-back +
                       # never a second pre-submit form - success needs the form gone)
                       # and detection hardening (no DEFAULT job/resume, no fake UA,
                       # host locale/timezone, real click-to-focus; an Ashby spam block
-                      # is named and filed a TERMINAL FAILED "SuS", never re-queued)
+                      # is named and filed a TERMINAL FAILED "SuS", never re-queued);
+                      # and the resume mirror (an S3 resume the Railway worker's egress
+                      # IP is refused is re-hosted into Supabase Storage on the allowed
+                      # CRM-sync host and resume_address repointed at the copy - the
+                      # client-details API first, the CRM table as fallback, and only
+                      # then an honest no_resume_source; a failed download never
+                      # clobbers the pointer and a re-sync reuses the cached copy)
 ```
 
 ---

@@ -1452,6 +1452,41 @@ export async function setSystemState(key, value) {
     .run(key, String(value), nowIso());
 }
 
+/* ---------------- resume mirrors (Supabase-hosted resume copies) ----- */
+
+export async function getApplicantResumeAddress(awlId) {
+  const row = await db.prepare('SELECT resume_address FROM applicants WHERE awl_id = ?').get(awlId);
+  return String(row?.resume_address || '').trim();
+}
+
+export async function setApplicantResumeAddress(awlId, url) {
+  await db.prepare('UPDATE applicants SET resume_address = ? WHERE awl_id = ?').run(url || '', awlId);
+}
+
+export async function getResumeMirror(awlId) {
+  return db.prepare('SELECT awl_id, source_url, cdn_url, token, bytes, mirrored_at FROM resume_mirrors WHERE awl_id = ?').get(awlId);
+}
+
+export async function upsertResumeMirror({ awlId, sourceUrl, cdnUrl, token = null, bytes = 0 }) {
+  await db.prepare(`INSERT INTO resume_mirrors (awl_id, source_url, cdn_url, token, bytes, mirrored_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(awl_id) DO UPDATE SET
+                source_url = excluded.source_url, cdn_url = excluded.cdn_url,
+                token = excluded.token, bytes = excluded.bytes, mirrored_at = excluded.mirrored_at`)
+    .run(awlId, sourceUrl, cdnUrl, token, Number(bytes) || 0, nowIso());
+}
+
+// Applicants that still carry a resume pointer the Railway worker may not be
+// able to reach (i.e. anything not already served from our own Supabase cdn).
+// The stager itself decides whether a mirror already exists, so this is just a
+// cheap candidate list; empty resume_address rows are skipped.
+export async function listResumeMirrorCandidates(limit = 500) {
+  return db.prepare(`SELECT awl_id, resume_address FROM applicants
+                     WHERE resume_address IS NOT NULL AND resume_address <> ''
+                     ORDER BY source_updated_at DESC LIMIT ?`).all(limit);
+}
+
+
 /* ------------------------------------------------------------------ */
 /* CA WORK-HISTORY + ca_data (v3.7)                                    */
 /* ------------------------------------------------------------------ */

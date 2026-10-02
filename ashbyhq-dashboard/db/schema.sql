@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS applicants (
   source_updated_at TEXT
 );
 
+-- One row per applicant whose CRM/S3 resume has been mirrored into Supabase
+-- Storage so the Railway apply worker (whose egress IP the S3 bucket refuses)
+-- can still fetch it. source_url is the external link at mirror time; when a
+-- later CRM sync repoints resume_address back at that SAME source we reuse the
+-- cached cdn_url instead of re-downloading. awl_id is the key; no FK so this
+-- table can be created independently of applicants.
+CREATE TABLE IF NOT EXISTS resume_mirrors (
+  awl_id TEXT PRIMARY KEY,
+  source_url TEXT NOT NULL,
+  cdn_url TEXT NOT NULL,
+  token TEXT,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  mirrored_at TEXT NOT NULL
+);
+
 -- (AWL-ID -> job link) pairs streamed from the external DB, waiting to be
 -- materialised into applications when the OPS assigns the applicant to a CA.
 CREATE TABLE IF NOT EXISTS applicant_joblinks (

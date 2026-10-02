@@ -22,9 +22,14 @@
        -> create the bucket once, public read: npm run setup:storage
    ===================================================================== */
 import fs from 'fs';
+import crypto from 'node:crypto';
 import { s3Config, s3Put } from './supabase-s3.js';
 
 const BUCKET = () => process.env.SUPA_SCREENSHOT_BUCKET || 'application-screenshots';
+
+// Object keys must survive an arbitrary AWL-id; keep them filesystem-safe.
+const slug = (s) => String(s || '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 64) || 'unknown';
+
 
 function storageConfig() {
   const s3 = s3Config();
@@ -79,3 +84,43 @@ export async function uploadScreenshot({ filePath, destPath, contentType = 'imag
     return { ok: false, error: err.message };
   }
 }
+
+/**
+ * Mirror an applicant resume (a Buffer) into the same public bucket, under
+ * resumes/<awl>-<token>.pdf. A random token in the key keeps the object
+ * un-enumerable even though AWL-ids are sequential; the token is stable across
+ * re-stages so an existing mirror is overwritten in place. Returns the public
+ * URL (what we store in applicants.resume_address) plus the token.
+ */
+export async function uploadResumeBuffer({ awlId, buffer, token } = {}) {
+  const cfg = storageConfig();
+  if (!cfg) return { ok: false, skipped: 'storage_not_configured' };
+  if (!awlId) return { ok: false, skipped: 'no_awl_id' };
+  if (!Buffer.isBuffer(buffer) || !buffer.length) return { ok: false, skipped: 'empty_buffer' };
+  const tok = String(token || '').replace(/[^a-f0-9]/gi, '').slice(0, 32) || crypto.randomBytes(6).toString('hex');
+  const objectPath = `resumes/${slug(awlId)}-${tok}.pdf`;
+  try {
+    if (cfg.backend === 's3') {
+      const r = await s3Put({ key: objectPath, body: buffer, contentType: 'application/pdf' });
+      return r.ok ? { ok: true, url: r.url, token: tok, bytes: r.bytes, via: 's3' } : r;
+    }
+    const res = await fetch(`${cfg.url}/storage/v1/object/${cfg.bucket}/${objectPath}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.key}`,
+        apikey: cfg.key,
+        'content-type': 'application/pdf',
+        'x-upsert': 'true'
+      },
+      body: buffer
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      return { ok: false, error: `upload_failed ${res.status} ${txt.slice(0, 200)}` };
+    }
+    return { ok: true, url: `${cfg.url}/storage/v1/object/public/${cfg.bucket}/${objectPath}`, token: tok, bytes: buffer.length, via: 'rest' };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+

@@ -64,6 +64,7 @@ import { staffDirectoryStats } from './connector/staff-directory.js';
 import { purgeLocalStaff, isForbiddenLoginEmail, removeDeadFixtures } from './connector/staff-purge.js';
 import { buildCaData, caDataStats } from './connector/ca-data.js';
 import { refreshWorkHistory } from './connector/work-history.js';
+import { stageResumeForAwl, stageResumesForPending } from './connector/resume-store.js';
 import {
   EXT_API_KEYS, extApiSettings, clearExtApiCache, caEmails, workHistory, clientDetails
 } from './connector/external-apis.js';
@@ -663,8 +664,15 @@ app.post('/api/dev/sync', requireAuth, requireRole('dev', 'admin'), wrap(async (
   const sync = await syncFromPostgres({ opsId: req.body.opsId || null });
   // A sync can bring in links nobody has scanned yet — same rule as ingestion:
   // every assigned link must end up with a cached question inventory.
-  return { sync, scan: await queueUnscannedLinks('sync') };
+  // The CRM just repointed every resume_address at the S3 link; re-host the
+  // copies into Supabase (best-effort) so the Railway worker can still fetch
+  // them. A failure here is reported, never fatal to the sync.
+  let resumes;
+  try { resumes = await stageResumesForPending({}); }
+  catch (err) { resumes = { error: String(err.message || err).slice(0, 200) }; }
+  return { sync, scan: await queueUnscannedLinks('sync'), resumes };
 }));
+
 
 // Purge every staff fixture that is NOT a real @applywizz.com/.ai person. A
 // full CRM /api/dev/sync already re-points applicants onto their real CA, so
@@ -699,8 +707,22 @@ app.post('/api/dev/sync-one', requireAuth, requireRole('dev', 'admin'), wrap(asy
   const awlId = String(req.body.awlId || req.body.awl_id || '').trim();
   if (!awlId) throw new HttpError(400, 'awlId is required');
   const sync = await syncApplicantByAwl(awlId, { opsId: req.body.opsId || null });
-  return { awlId, sync, scan: await queueUnscannedLinks('sync-one') };
+  let resumes;
+  try { resumes = await stageResumeForAwl(awlId); }
+  catch (err) { resumes = { error: String(err.message || err).slice(0, 200) }; }
+  return { awlId, sync, scan: await queueUnscannedLinks('sync-one'), resumes };
 }));
+
+// (Re)mirror applicant resumes into Supabase Storage so the Railway worker can
+// fetch them despite the S3 bucket refusing its egress IP. One AWL if awlId is
+// given, else every candidate. force:true re-downloads even a cached copy.
+app.post('/api/dev/resumes/stage', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => {
+  const awlId = String(req.body.awlId || req.body.awl_id || '').trim();
+  const force = req.body.force === true;
+  if (awlId) return { awlId, result: await stageResumeForAwl(awlId, { force }) };
+  return { summary: await stageResumesForPending({ limit: Number(req.body.limit) || 500, force }) };
+}));
+
 
 // Rebuild the AWL-ID -> CA -> OM(CAM) org chart on demand: seed the committed
 // roster as staff, then derive CA -> OM edges from clients_additional_info.

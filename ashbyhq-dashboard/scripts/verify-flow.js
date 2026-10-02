@@ -1464,8 +1464,10 @@ async function verifyDetectionHardening() {
   // (3) Fields get a REAL click-to-focus, not a programmatic focus() + no-op trial.
   const tvIdx = eng.indexOf('async function humanTypeValue');
   const tv = tvIdx >= 0 ? eng.slice(tvIdx, eng.indexOf('\nasync function', tvIdx + 10)) : '';
-  check('humanTypeValue focuses with a real click (no locator.focus()/trial:true tell)',
-    /locator\.click\(/.test(tv) && !/\.focus\(\)/.test(tv) && !/trial:\s*true/.test(tv));
+  const focusCalls = (tv.match(/\.focus\(\)/g) || []).length;
+  const focusFallbacks = (tv.match(/\.focus\(\)\.catch/g) || []).length;
+  check('humanTypeValue focuses with a real click; any locator.focus() is only a swallowed fallback (never a bare programmatic tell, no trial:true)',
+    /locator\.click\(/.test(tv) && focusCalls === focusFallbacks && !/trial:\s*true/.test(tv));
 
   // (4) waitForSubmissionOutcome names the spam/security block explicitly.
   const woIdx = eng.indexOf('async function waitForSubmissionOutcome');
@@ -1481,6 +1483,95 @@ async function verifyDetectionHardening() {
   // missing-field failure still reopens while spam does not.
   check('the worker maps the engine spam block to a terminal FAILED "SuS"',
     /spamBlocked[\s\S]{0,400}outcome = 'failed'; reason = 'SuS'/.test(run));
+}
+
+async function verifyResumeMirror() {
+  step('14. Resume mirror: an S3 resume Railway cannot reach is re-hosted in Supabase');
+  const store = await import('../db/store.js');
+  const { stageResumeForAwl, stageResumesForPending, isOurCdnUrl } = await import('../connector/resume-store.js');
+  const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
+  const RM = 'AWL-VERIFY-RM';
+  const S3_API = 'https://applywizz-prod.s3.us-east-2.amazonaws.com/CRM/api.pdf';
+  const S3_TBL = 'https://applywizz-prod.s3.us-east-2.amazonaws.com/CRM/tbl.pdf';
+  const CDN = 'https://proj.supabase.co/storage/v1/object/public/screenshots/resumes/awlvrfyrmmom-abcdef.pdf';
+
+  check('isOurCdnUrl recognises a Supabase public URL but never the raw S3 link',
+    isOurCdnUrl(CDN) === true && isOurCdnUrl(S3_API) === false);
+
+  try {
+    await store.upsertExternalApplicant({ awlId: RM, fullName: RM, email: '', resumeAddress: S3_TBL, materialize: false });
+    const apiOk = { ok: true, data: { client: { resume_url: S3_API } } };
+    const withApi = async () => apiOk;
+    const noApi = async () => ({ ok: false, skipped: 'not_configured' });
+    const up = async () => ({ ok: true, url: CDN, token: 'abcdef' });
+    let dlCalls = 0;
+    const dl = async () => { dlCalls += 1; return { ok: true, status: 200, buffer: Buffer.from('PDFPDF') }; };
+
+    // (A) API-first source, mirrored + resume_address repointed + bookkeeping row.
+    const rA = await stageResumeForAwl(RM, { downloadImpl: dl, uploadImpl: up, clientDetailsImpl: withApi });
+    check('a resume mirror prefers the client-details API source over the stored table link',
+      rA.ok === true && rA.via === 'api');
+    check('...re-hosts it and repoints resume_address at the Supabase copy',
+      (await store.getApplicantResumeAddress(RM)) === CDN && rA.url === CDN);
+    check('...and records the mirror keyed to that source',
+      (await store.getResumeMirror(RM))?.source_url === S3_API);
+
+    // (B) idempotent: same source already mirrored -> reuse, never re-download.
+    const rB = await stageResumeForAwl(RM, { downloadImpl: dl, uploadImpl: up, clientDetailsImpl: withApi });
+    check('a re-sync with the same source reuses the copy instead of re-downloading',
+      rB.ok === true && rB.skipped === 'already_mirrored' && dlCalls === 1);
+
+    // (C) a later sync clobbered resume_address back to S3 -> restore from cache, no download.
+    await store.setApplicantResumeAddress(RM, S3_API);
+    const rC = await stageResumeForAwl(RM, { downloadImpl: dl, uploadImpl: up, clientDetailsImpl: withApi });
+    check('when a later sync repoints the raw link the cached copy is restored without a download',
+      rC.ok === true && rC.restored === true && dlCalls === 1 && (await store.getApplicantResumeAddress(RM)) === CDN);
+
+    // (D) no API resume -> fall back to the CRM-table link (via 'table').
+    await store.setApplicantResumeAddress(RM, S3_TBL);
+    await db.prepare('DELETE FROM resume_mirrors WHERE awl_id = ?').run(RM);
+    const rD = await stageResumeForAwl(RM, { downloadImpl: dl, uploadImpl: up, clientDetailsImpl: noApi });
+    check('with no API resume it falls back to the CRM-table link', rD.ok === true && rD.via === 'table');
+
+    // (E) a download failure NEVER clobbers the current pointer.
+    await store.setApplicantResumeAddress(RM, S3_TBL);
+    await db.prepare('DELETE FROM resume_mirrors WHERE awl_id = ?').run(RM);
+    const rE = await stageResumeForAwl(RM, { downloadImpl: async () => ({ ok: false, status: 403 }), uploadImpl: up, clientDetailsImpl: noApi });
+    check('an unreachable (403) resume is reported and the current pointer is left intact',
+      rE.ok === false && /download_failed 403/.test(rE.reason) && (await store.getApplicantResumeAddress(RM)) === S3_TBL);
+
+    // (F) genuinely absent -> honest no_resume_source (the acknowledgement).
+    await store.setApplicantResumeAddress(RM, '');
+    await db.prepare('DELETE FROM resume_mirrors WHERE awl_id = ?').run(RM);
+    const rF = await stageResumeForAwl(RM, { downloadImpl: dl, uploadImpl: up, clientDetailsImpl: noApi });
+    check('with neither API nor table resume it is an honest no_resume_source',
+      rF.ok === false && rF.reason === 'no_resume_source');
+
+    // (G) the pending sweep exposes an aggregate summary.
+    const swept = await stageResumesForPending({ listCandidates: async () => [] });
+    check('the pending sweep reports an aggregate summary', swept && swept.seen === 0 && Array.isArray(swept.failures));
+  } finally {
+    await db.prepare('DELETE FROM resume_mirrors WHERE awl_id = ?').run(RM);
+    await db.prepare('DELETE FROM applicants WHERE awl_id = ?').run(RM);
+  }
+
+  // ---- wiring: the CRM-sync host mirrors best-effort; a route re-stages on demand ----
+  const syncIdx = serverSrc.indexOf(`app.post('/api/dev/sync'`);
+  const syncBlock = syncIdx >= 0 ? serverSrc.slice(syncIdx, serverSrc.indexOf('}));', syncIdx)) : '';
+  check('/api/dev/sync mirrors resumes best-effort after a CRM sync (never fatal)',
+    /try \{ resumes = await stageResumesForPending/.test(syncBlock));
+  const sIdx = serverSrc.indexOf(`app.post('/api/dev/sync-one'`);
+  const sBlock = sIdx >= 0 ? serverSrc.slice(sIdx, serverSrc.indexOf('}));', sIdx)) : '';
+  check('/api/dev/sync-one stages that one applicant resume', /stageResumeForAwl\(awlId\)/.test(sBlock));
+  const stIdx = serverSrc.indexOf(`app.post('/api/dev/resumes/stage'`);
+  const stBlock = stIdx >= 0 ? serverSrc.slice(stIdx, serverSrc.indexOf('}));', stIdx)) : '';
+  check('a DEV/ADMIN route re-stages resumes on demand',
+    stBlock.includes(`requireAuth, requireRole('dev', 'admin')`));
+
+  const sqlA = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'db', 'schema.sql'), 'utf8');
+  const sqlB = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'db', 'schema.supabase.sql'), 'utf8');
+  check('resume_mirrors is defined in both schema files',
+    /CREATE TABLE IF NOT EXISTS resume_mirrors/.test(sqlA) && /CREATE TABLE IF NOT EXISTS resume_mirrors/.test(sqlB));
 }
 
 async function verifyCrmFetch() {
@@ -1512,6 +1603,7 @@ try {
   await verifyAssignmentHealth();
   await verifySubmissionProof();
   await verifyDetectionHardening();
+  await verifyResumeMirror();
   if (process.argv.includes('--crm')) await verifyCrmFetch();
 } catch (err) {
   failed += 1;
