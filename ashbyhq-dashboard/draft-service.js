@@ -201,7 +201,7 @@ function boundChoiceMatch(options, value) {
 export function fuzzyMatchFromPool(question, pool) {
   const raw = String(question || '').trim();
   if (!raw || raw.length < 4) return '';
-  if (/\b(describe|explain|tell\s+me|why|how\s+did|motivat|passion|interest|achievements?|projects?|experience|responsibilit|cover\s+letter)\b/i.test(raw)) return '';
+  if (/\b(describe|explain|tell\s+me|why|how\s+did|motivat|passion|interest|achievements?|projects?|experience|responsibilit|cover\s+letter|preferences?|notifications?|alerts?|availability|interview)\b/i.test(raw)) return '';
   const q = normalize(raw);
   if (q.length < 4) return '';
   let best = '';
@@ -209,13 +209,16 @@ export function fuzzyMatchFromPool(question, pool) {
   for (const [k, v] of Object.entries(pool || {})) {
     if (!v || typeof v !== 'string') continue;
     const kn = normalize(k);
-    if (kn.length < 5) continue;
-    // Whole-word containment (with a boundary check so a short key like "id"
-    // never matches inside "avid"). Either direction: "LinkedIn Profile URL"
-    // contains key "linkedin"; a question literally titled "Portfolio" is
-    // inside key "portfolio_url".
-    const qHas = ` ${q} `.includes(` ${kn} `) || q.includes(kn);
-    const kHas = ` ${kn} `.includes(` ${q} `) || kn.includes(q);
+    // Skip tiny keys. 'email' / 'phone' (5 chars) are owned by DERIVED_RULES
+    // upstream and would cause false positives on a question like "Email
+    // preferences" if we let a substring match them here.
+    if (kn.length < 6) continue;
+    // STRICT word-boundary containment: the key appears as a whole phrase
+    // in the question (or vice-versa), padded on both sides with spaces.
+    // This rejects 'location' matching inside 'relocation' and rejects
+    // 'email' matching inside 'email preferences'.
+    const qHas = ` ${q} `.includes(` ${kn} `);
+    const kHas = ` ${kn} `.includes(` ${q} `);
     const score = Math.max(qHas ? kn.length : 0, kHas ? q.length : 0);
     if (score > bestLen) { bestLen = score; best = v; }
   }

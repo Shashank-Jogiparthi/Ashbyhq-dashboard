@@ -1641,6 +1641,12 @@ async function verifyFiveStageAndIdentityFirst() {
     fuzzyMatchFromPool('Work authorization status', pool) === '');
   check('fuzzy match never fires on a short key inside an unrelated word (word boundary)',
     fuzzyMatchFromPool('Are you an avid reader', { id: 'xyz', avidness: 'yes' }) === '');
+  check('fuzzy match REFUSES tiny 5-char keys ("email"/"phone") owned by DERIVED_RULES upstream',
+    fuzzyMatchFromPool('Email preferences', { email: 'x@y.com', phone: '555-1212' }) === '');
+  check('fuzzy match refuses "location" matching inside "relocation" (strict word boundary)',
+    fuzzyMatchFromPool('Are you open to relocation?', { location: 'Raleigh' }) === '');
+  check('fuzzy match refuses a "preferences / notifications / availability" question by narrative guard',
+    fuzzyMatchFromPool('LinkedIn notification preferences', pool) === '');
 
   // --- CA reduced view (source inspection of app.js).
   check('app.js classifies identity rows with anchored question-text patterns',
