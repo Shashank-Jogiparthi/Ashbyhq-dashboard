@@ -123,7 +123,10 @@ export async function buildCaData({
         const res = await upsertExternalApplicant({
           awlId: awl,
           fullName: row.full_name || awl,
-          email: row.personal_email || row.company_email || '',
+          // MANDATORY: company_email is the applicant's identity for every
+          // application. personal_email only fills the gap for a legacy row
+          // that has no company_email yet; the order must never swap.
+          email: row.company_email || row.personal_email || '',
           caId: tree.caId,
           opsId: tree.opsId,
           materialize: false

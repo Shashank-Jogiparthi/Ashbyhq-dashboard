@@ -199,10 +199,12 @@ function normalizeApplicantPayload(applicantPayload = {}) {
       name: applicantPayload.full_name || client.full_name || additional.full_name || '',
       firstName: applicantPayload.first_name || client.first_name || '',
       lastName: applicantPayload.last_name || client.last_name || '',
-      email: applicantPayload.personal_email || client.personal_email || additional.personal_email || ''
+      // MANDATORY: the client's COMPANY email wins over personal_email
+      // everywhere. personal_email is only a fallback for a legacy row.
+      email: applicantPayload.company_email || client.company_email || additional.company_email || applicantPayload.personal_email || client.personal_email || additional.personal_email || ''
     },
     contact: {
-      email: applicantPayload.personal_email || client.personal_email || additional.personal_email || '',
+      email: applicantPayload.company_email || client.company_email || additional.company_email || applicantPayload.personal_email || client.personal_email || additional.personal_email || '',
       phone: applicantPayload.phone || client.whatsapp_number || client.callable_phone || additional.primary_phone || '',
       whatsapp: client.whatsapp_number || additional.whatsapp_number || '',
       mobile: client.callable_phone || additional.primary_phone || ''

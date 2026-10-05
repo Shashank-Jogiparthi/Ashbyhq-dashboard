@@ -94,7 +94,10 @@ function keep(v) {
 // Either may be missing; we merge whatever we have. Keyed by applywizz_id.
 export function mapCombined(prof = {}, info = {}) {
   const fullName = cell(pick(info, 'full_name', 'fullName')) || cell(pick(prof, 'full_name'));
-  const email = cell(pick(info, 'personal_email', 'company_email'));
+  // MANDATORY: the client's COMPANY email is what goes on every application,
+  // not their personal one. personal_email is only a safety-net for a legacy
+  // row that has no company_email yet - the priority must never reverse.
+  const email = cell(pick(info, 'company_email', 'personal_email'));
   const phone = cell(pick(info, 'callable_phone', 'whatsapp_number')) || cell(pick(prof, 'primary_phone'));
   const awlId = normalizeAwlId(cell(pick(prof, 'applywizz_id')) || cell(pick(info, 'applywizz_id')));
   const extId = cell(pick(info, 'id')) || cell(pick(prof, 'id')) || null;

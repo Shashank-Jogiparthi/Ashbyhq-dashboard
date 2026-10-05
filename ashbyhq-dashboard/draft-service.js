@@ -1,23 +1,41 @@
 /* =====================================================================
    PRE-APPLY DRAFT PASS.
 
-   Given (applicant, link) and the cached job_link_fields, produce one
-   applicant_field_answers row per scanned field, classifying each as:
+   Five-stage resolution order for every scanned field. Stages run in
+   strict priority; a value produced by an earlier stage is final and no
+   later stage may override it. CA edits still win over everything
+   (see 'ca_edited' short-circuit below).
 
-     source = 'deterministic'  -> value resolved instantly from the applicant
-                                  record via DERIVED_RULES (Tier 1/2). Shown
-                                  to the CA under "auto-filled", read-only
-                                  unless they choose to override.
-     source = 'genai'          -> GenAI drafted a natural-language answer
-                                  grounded on the record (Tier 3). CA must
-                                  approve/edit before APPLY is enabled.
-     source = 'missing_fact'   -> No data anywhere in the record and the
-                                  model declined (correctly, per the
-                                  grounded-only rule). CA must type a value
-                                  or click "Use N/A" before APPLY.
-     source = 'placeholder'    -> Tier-4 stand-in (N/A / 0) applied to a
-                                  non-critical, non-choice field so the form
-                                  would still submit if the CA leaves it.
+     STAGE 1  DATABASE        (Tier 1 / 2 / 2.5) - resolveDerived + the
+              semantic column mapper read the CRM row that is already
+              cached on applicants.profile_json. This is the primary
+              source of truth for identity + knock-out facts.
+     STAGE 2  CLIENT-API      get-client-details is fetched live (once
+              per pass, memoized) and the derived rules replay against
+              the fresh record. Catches rows whose CRM sync lagged.
+     STAGE 3  RESUME PARSE    resumeShapeAnswer scans the applicant's
+              own PDF for a clean text shape match (email / phone /
+              URL / date) that neither the DB nor the API exposed.
+     STAGE 4  FUZZY POOL      fuzzyMatchFromPool - the question text is
+              matched against every key Stages 1-2 put on the map, so
+              an exact-spell column name the DERIVED_RULES missed still
+              resolves deterministically. Precision-only, never fires
+              on narrative questions.
+     STAGE 5  GENAI           generateFreeTextAnswer / generateChoiceAnswer
+              - the model drafts only what none of the above could
+              source (essays, "why are you interested", etc.).
+
+   Every stage-1..4 hit is stored with source='deterministic'; stage-5
+   hits with source='genai'. A field none of the five answered is
+   'missing_fact' (required) or 'placeholder' (optional), never silent.
+
+     source = 'deterministic'  -> resolved by Stages 1-4. CA sees it as
+                                  "auto-filled"; can override.
+     source = 'genai'          -> Stage 5 drafted a grounded answer. CA
+                                  must approve/edit before APPLY.
+     source = 'missing_fact'   -> No data anywhere and the model declined.
+     source = 'placeholder'    -> Tier-4 stand-in for a non-critical
+                                  optional field so the form can submit.
 
    The pass is entirely browser-free; the worker's later submit run just
    replays the confirmed values into the DOM. This is what makes the flow
@@ -29,6 +47,7 @@ import { db } from './db/index.js';
 import { listJobLinkFields, upsertFieldAnswer, listFieldAnswers, recordColumnVocabulary } from './db/store.js';
 import { ensureFieldBindings } from './field-mapping.js';
 import { resumeTextFor } from './resume-cache.js';
+import { clientDetails } from './connector/external-apis.js';
 
 const {
   buildRecordMap, resolveDerived, flattenRecordText,
@@ -164,6 +183,48 @@ function boundChoiceMatch(options, value) {
 /* ------------------------------------------------------------------ */
 
 /**
+ * STAGE 4 (fuzzy pool match) - a last deterministic check before GenAI.
+ *
+ * The question's own text is compared against every record key that stage 1
+ * (DB profile) or stage 2 (client-API) put on the map. Fires ONLY when the
+ * normalized key appears as a whole-word substring of the normalized question
+ * (or vice-versa) and the key is at least 5 chars. Narrative questions
+ * (describe / tell me / why / how / experience / project) are refused outright
+ * so we never answer an essay by substring. This is a precision-only pass:
+ * it exists to catch the exact-spelling cases DERIVED_RULES missed, not to
+ * guess. GenAI (stage 5) still owns every question this abstains on.
+ *
+ * @param {string} question the scanned question text
+ * @param {Record<string,string>} pool normalized record-map keys -> values
+ * @returns {string} the matched value, or '' when nothing qualifies
+ */
+export function fuzzyMatchFromPool(question, pool) {
+  const raw = String(question || '').trim();
+  if (!raw || raw.length < 4) return '';
+  if (/\b(describe|explain|tell\s+me|why|how\s+did|motivat|passion|interest|achievements?|projects?|experience|responsibilit|cover\s+letter)\b/i.test(raw)) return '';
+  const q = normalize(raw);
+  if (q.length < 4) return '';
+  let best = '';
+  let bestLen = 0;
+  for (const [k, v] of Object.entries(pool || {})) {
+    if (!v || typeof v !== 'string') continue;
+    const kn = normalize(k);
+    if (kn.length < 5) continue;
+    // Whole-word containment (with a boundary check so a short key like "id"
+    // never matches inside "avid"). Either direction: "LinkedIn Profile URL"
+    // contains key "linkedin"; a question literally titled "Portfolio" is
+    // inside key "portfolio_url".
+    const qHas = ` ${q} `.includes(` ${kn} `) || q.includes(kn);
+    const kHas = ` ${kn} `.includes(` ${q} `) || kn.includes(q);
+    const score = Math.max(qHas ? kn.length : 0, kHas ? q.length : 0);
+    if (score > bestLen) { bestLen = score; best = v; }
+  }
+  return best;
+}
+
+/* ------------------------------------------------------------------ */
+
+/**
  * Run the pre-Apply draft pass for one (applicant, link) pair.
  * @param {string} awlId
  * @param {number} linkId
@@ -209,6 +270,32 @@ export async function runDraftPass(awlId, linkId, opts = {}) {
     linkId, rows, recordKeys: [...new Set([...Object.keys(recordMap), ...(await recordColumnVocabulary())])], log
   });
   const bindings = mapping.bindings;
+
+  // STAGE 2 (client-API): a lazy single fetch, only fired when the loop
+  // actually needs it - i.e. when a field fell through the CRM record's own
+  // Tier 1 / 2 / 2.5 rules. The API returns the same {client, additional_information}
+  // shape the CRM sync writes, so we build a parallel recordMap and replay
+  // the derived rules against the fresh values. Memoized across the pass.
+  // Not folded into the GenAI `context` on purpose: Stage 2 is a
+  // deterministic value source, not a narrative grounding.
+  let apiMap = null;
+  let apiMapStarted = false;
+  const ensureApiMap = async () => {
+    if (apiMapStarted) return apiMap;
+    apiMapStarted = true;
+    try {
+      const res = await clientDetails(awlId);
+      const data = res && res.ok === false ? null : (res?.data || res);
+      if (data && typeof data === 'object') {
+        apiMap = buildRecordMap({
+          raw: { client: data.client || {}, additional_information: data.additional_information || {} }
+        });
+      }
+    } catch (err) {
+      log(`stage-2 client-API fetch failed: ${String(err?.message || err).slice(0, 140)}`);
+    }
+    return apiMap;
+  };
 
   // CA authority: once a Career Associate has approved/edited a field it is the
   // FIXED value for that (applicant, link) — a later draft pass (re-scan, re-run,
@@ -330,6 +417,30 @@ export async function runDraftPass(awlId, linkId, opts = {}) {
       }
     }
 
+    // STAGE 2 (client-API): the CRM row missed this fact, so ask the live
+    // apply-wizz get-client-details endpoint (fetched once, memoized) and
+    // replay the derived rules against the fresh record. A choice field still
+    // has to land on one of the form's presented options; if the API's value
+    // is off-list we abstain and pass to the next stage rather than guess.
+    const freshMap = await ensureApiMap();
+    if (freshMap) {
+      let apiDerived = resolveDerived(field, freshMap, profile);
+      if (apiDerived && isChoice) {
+        const matched = matchOption(r.options || [], apiDerived);
+        apiDerived = matched || '';
+      }
+      if (apiDerived) {
+        await upsertFieldAnswer({
+          awlId, linkId, fieldKey: r.field_key, questionText: r.question_text,
+          fieldType: r.field_type, options: r.options, value: apiDerived,
+          source: 'deterministic', evidence: ['from the client-details API'], sortOrder: r.sort_order, optional
+        });
+        outcome.deterministic += 1;
+        outcome.rows.push({ key: r.field_key, source: 'deterministic', via: 'client-api', question: r.question_text, value: apiDerived });
+        continue;
+      }
+    }
+
     // Deterministic resume fallback (the CRM record already had its chance in
     // Tiers 1-2.5): before handing an email / phone / link question to GenAI or
     // to the CA, read the applicant's OWN resume for a clean shape match. It is
@@ -352,6 +463,31 @@ export async function runDraftPass(awlId, linkId, opts = {}) {
         });
         outcome.deterministic += 1;
         outcome.rows.push({ key: r.field_key, source: 'deterministic', via: 'resume', question: r.question_text, value: rvalue });
+        continue;
+      }
+    }
+
+    // STAGE 4 (fuzzy pool match): the question text itself is checked against
+    // every key Stages 1-2 put on the map. Deliberately conservative so a
+    // narrative question still falls through to GenAI (Stage 5) rather than
+    // being answered by substring luck. A choice field still has to land on
+    // one of the form's presented options.
+    const fuzzyPool = freshMap ? { ...recordMap, ...freshMap } : recordMap;
+    const fromFuzzy = fuzzyMatchFromPool(r.question_text, fuzzyPool);
+    if (fromFuzzy) {
+      let fvalue = fromFuzzy;
+      if (isChoice) {
+        const matched = matchOption(r.options || [], fvalue);
+        fvalue = matched || '';
+      }
+      if (fvalue) {
+        await upsertFieldAnswer({
+          awlId, linkId, fieldKey: r.field_key, questionText: r.question_text,
+          fieldType: r.field_type, options: r.options, value: fvalue,
+          source: 'deterministic', evidence: ['fuzzy match against the record pool'], sortOrder: r.sort_order, optional
+        });
+        outcome.deterministic += 1;
+        outcome.rows.push({ key: r.field_key, source: 'deterministic', via: 'fuzzy', question: r.question_text, value: fvalue });
         continue;
       }
     }

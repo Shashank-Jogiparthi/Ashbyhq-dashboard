@@ -524,6 +524,24 @@ function updateApplyGate(appId, blockers, loaded) {
   else { btn.disabled = false; btn.title = ''; }
 }
 
+/* The four questions that always stay visible in the CA review pane, so the
+   operator can confirm the applicant's identity at a glance. Everything else
+   the draft pass resolved lives behind the "View application" toggle. The
+   test reads the ROW's own question text (not the field_key) because Ashby
+   labels vary per link; anchored + narrow so it never sweeps up a generic
+   "Email preferences" or "Phone interview" question. */
+const IDENTITY_TESTS = [
+  /^\s*(your\s+)?first\s*name\s*\(?(required|optional)?\)?\s*$/i,
+  /^\s*(your\s+)?(last|family|sur)\s*name\s*\(?(required|optional)?\)?\s*$/i,
+  /^\s*(your\s+|the\s+)?(primary\s+|alternate\s+|mobile\s+|cell\s+|contact\s+|callable\s+|preferred\s+)?(phone|telephone|whatsapp|mobile)(\s*(number|no\.?|#))?\s*$/i,
+  /^\s*(your\s+)?(personal|work|company|official|business)?\s*e[-\s]?mail(\s+address)?\s*$/i
+];
+function isIdentityRow(r) {
+  const q = String((r && (r.question_text || r.question)) || '').trim();
+  if (!q) return false;
+  return IDENTITY_TESTS.some((re) => re.test(q));
+}
+
 function renderReviewPane(appId, state) {
   const pane = $(`review-${appId}`);
   if (!pane) return;
@@ -537,15 +555,37 @@ function renderReviewPane(appId, state) {
   const allGaps = [...(g.missing_fact || []), ...(g.needs_input || [])];
   const gaps = allGaps.filter((r) => !r.optional);
   const optionalGaps = allGaps.filter((r) => r.optional);
-  const openGaps = gaps.filter((r) => !r.value).length;
   const info = [...(g.not_applicable || []), ...(g.stale || [])];
+  // REDUCED DEFAULT VIEW. The CA sees the four identity fields first
+  // (first name, last name, phone, email) - the values that must never be
+  // wrong - and every other pre-filled / AI-drafted / gap row is tucked
+  // behind a single "View application" toggle. Nothing about the flow
+  // changes: the 5-stage draft pass still resolves the full set server-side
+  // and updateApplyGate() still counts every blocker, so APPLY stays locked
+  // until the CA opens the toggle and clears what still needs input.
+  const identity = [];
+  const detRest = []; const aiRest = []; const gapsRest = []; const optRest = []; const infoRest = [];
+  const bucket = (r, into) => (isIdentityRow(r) ? identity : into).push(r);
+  det.forEach((r) => bucket(r, detRest));
+  ai.forEach((r) => bucket(r, aiRest));
+  gaps.forEach((r) => bucket(r, gapsRest));
+  optionalGaps.forEach((r) => bucket(r, optRest));
+  info.forEach((r) => bucket(r, infoRest));
+  // Identity rows keep their real input mode so CA can still edit unknowns
+  // and confirm knowns. Anything the draft left open is required.
+  const identityMode = (r) => (r.source === 'missing_fact' || r.source === 'needs_input') ? 'required' : 'edit';
+  const openGaps = gapsRest.filter((r) => !r.value).length;
+  const restTotal = detRest.length + aiRest.length + gapsRest.length + optRest.length + infoRest.length;
   pane.innerHTML = `
-    ${det.length ? `<details class="review-sec review-a"><summary>✓ Auto-filled from profile (${det.length}) — tap to review / edit</summary>${det.map((r) => fieldRow(appId, r, 'edit')).join('')}</details>` : ''}
-    ${ai.length ? `<details class="review-sec review-b" open><summary>✍️ AI-drafted — please review (${ai.length})</summary>${ai.map((r) => fieldRow(appId, r, 'edit')).join('')}</details>` : ''}
-    ${gaps.length ? `<details class="review-sec review-c" open><summary>❗ Needs your input (${openGaps})</summary>${gaps.map((r) => fieldRow(appId, r, 'required')).join('')}</details>` : ''}
-    ${optionalGaps.length ? `<details class="review-sec review-o"><summary>◽ Optional (${optionalGaps.length}) — leave blank to skip</summary>${optionalGaps.map((r) => fieldRow(appId, r, 'optional')).join('')}</details>` : ''}
-    ${info.length ? `<details class="review-sec review-i"><summary>ℹ Not a typed question (${info.length}) — upload / no longer on the form</summary>${info.map((r) => fieldRow(appId, r, 'readonly')).join('')}</details>` : ''}
-    ${!det.length && !ai.length && !gaps.length && !optionalGaps.length && !info.length ? '<div class="muted">No fields resolved. Try re-running the scan + draft.</div>' : ''}`;
+    ${identity.length ? `<details class="review-sec review-primary" open><summary>👤 Primary contact (${identity.length}) — first name, last name, phone, company email</summary>${identity.map((r) => fieldRow(appId, r, identityMode(r))).join('')}</details>` : ''}
+    ${restTotal ? `<details class="review-sec review-full"><summary>📄 View application (${restTotal} more question${restTotal === 1 ? '' : 's'}) — pre-filled answers, AI drafts, and items that still need you</summary>
+      ${detRest.length ? `<details class="review-sec review-a"><summary>✓ Auto-filled from profile (${detRest.length}) — tap to review / edit</summary>${detRest.map((r) => fieldRow(appId, r, 'edit')).join('')}</details>` : ''}
+      ${aiRest.length ? `<details class="review-sec review-b" open><summary>✍️ AI-drafted — please review (${aiRest.length})</summary>${aiRest.map((r) => fieldRow(appId, r, 'edit')).join('')}</details>` : ''}
+      ${gapsRest.length ? `<details class="review-sec review-c" open><summary>❗ Needs your input (${openGaps})</summary>${gapsRest.map((r) => fieldRow(appId, r, 'required')).join('')}</details>` : ''}
+      ${optRest.length ? `<details class="review-sec review-o"><summary>◽ Optional (${optRest.length}) — leave blank to skip</summary>${optRest.map((r) => fieldRow(appId, r, 'optional')).join('')}</details>` : ''}
+      ${infoRest.length ? `<details class="review-sec review-i"><summary>ℹ Not a typed question (${infoRest.length}) — upload / no longer on the form</summary>${infoRest.map((r) => fieldRow(appId, r, 'readonly')).join('')}</details>` : ''}
+    </details>` : ''}
+    ${!identity.length && !restTotal ? '<div class="muted">No fields resolved. Try re-running the scan + draft.</div>' : ''}`;
   pane.querySelectorAll('[data-field-key]').forEach((el) => {
     el.addEventListener('change', () => onAnswerEdit(appId, el));
   });

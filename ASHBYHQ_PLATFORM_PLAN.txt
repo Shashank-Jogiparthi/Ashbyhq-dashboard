@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 283 checks pass.
+CA under them. 305 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 283 checks pass.
+"…Number" / location box abstains. 305 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,7 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 283 checks pass.
+watchdog kills + frees the slot. 305 checks pass.
 
 ====================================================================
 16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
@@ -1372,7 +1372,7 @@ One consequence the operator accepted: the whitelist also removes the old
 @applywizz.local DEV/admin-style logins. The two real ADMINs (@applywizz.ai)
 always remain, and DEV sign-up stays open, so access is never globally lost -
 but a re-created login should use an @applywizz.com/.ai address to survive the
-next cleanup. 283 checks pass.
+next cleanup. 305 checks pass.
 
 ====================================================================
 18. v3.6e - SIGN-UP MINTS ONLY CA / OM / DEV, NEVER ADMIN
@@ -1406,7 +1406,7 @@ RULE (not a setting), asserted in verify:flow step 8:
     requireRole('admin') - verify asserts no createStaff(...role:'admin') path
     exists outside sign-up.
 
-283 checks pass.
+305 checks pass.
 
 ====================================================================
 19. v3.6f - THE @applywizz.local DOMAIN IS DEAD, EVERYWHERE
@@ -1443,7 +1443,7 @@ rows they owned (12 references - ca_id on rakesh, manager_id on priya.cam, the
 same submissions) survive with only the phantom owner set NULL, 0 applicants
 moved (they were re-pointed in v3.6d), 64 real @applywizz staff and the 2 real
 admins untouched. Nothing recreates them: seedStaffDirectory only upserts roster
-rows, never the fixtures. 283 checks pass.
+rows, never the fixtures. 305 checks pass.
 
 ====================================================================
 20. v3.7 - CA WORK-HISTORY + ca_data (DYNAMIC EXTERNAL APIs, VISIBILITY-ONLY)
@@ -1550,7 +1550,7 @@ local application; and an unset base skips the network entirely. verify:flow ste
 exhaustively, listUnassignedApplicants returns exactly the ca_id-NULL set (and
 drops a row once it has a CA), the resolve route re-syncs from the CRM and never
 calls createStaff, and the link ingest reports unassigned AWLs instead of silently
-accepting a shell. Completed work is committed + pushed by default. 283 checks
+accepting a shell. Completed work is committed + pushed by default. 305 checks
 pass.
 
 ====================================================================
@@ -1569,7 +1569,7 @@ RULE, asserted in verify:flow step 12: the success matcher no longer carries the
 standalone "success" token (only real confirmation phrases), and success is
 declared only once the form's own submit control has disappeared (the structural
 proof the click reached the confirmation) - so the acknowledgement screenshot is
-the post-submit page, never a second pre-submit form. 283 checks pass.
+the post-submit page, never a second pre-submit form. 305 checks pass.
 
 ====================================================================
 22. v3.7b - BLENDED INTO THE PAGE: FINGERPRINT HONESTY + A NAMED "SuS" BLOCK
@@ -1609,7 +1609,7 @@ RULE, asserted in verify:flow step 13 (source inspection, no live run): the engi
 has no DEFAULT_* job/resume constants and no hardcoded userAgent; locale+timezone
 come from the host; humanTypeValue uses a real click (no focus()/trial tell); the
 engine names 'spam-blocked' and files it FAILED 'SuS'; and the worker maps the
-spam block to a terminal FAILED 'SuS'. 283 checks pass.
+spam block to a terminal FAILED 'SuS'. 305 checks pass.
 
 23. v3.7c - WORK-HISTORY DRIVES THE CA ASSIGNMENT (NOT THE AWL'S API KEY)
 
@@ -1658,7 +1658,7 @@ the LATEST CA, a same-day handover resolves by the later end_time (not iteration
 order), refreshWorkHistory reports how many AWLs it assigned, getApplicantsForCa
 surfaces a pending job link (pending_links >= 1) while job_count stays 0, and
 listPendingLinksForCa returns the provided pending link over a CA-role-scoped route.
-283 checks pass.
+305 checks pass.
 
 24. v3.7d - THE TWO-TABLE CRM JOIN IS UUID-FIRST (A RESUME IS NEVER LOST ON A BAD
       applywizz_id)
@@ -1691,7 +1691,7 @@ RULE, asserted in verify:flow step 11: a profile with a blank applywizz_id is jo
 by its uuid and its resume survives mapCombined (awlId + resumeAddress recovered - the
 AWL-4593 class closed); the stable uuid beats a mismatched applywizz_id without
 re-keying the AWL; a profile with no uuid match falls back to the applywizz_id join;
-and a profile-only row (no CRM info) still keeps its own AWL-ID. 283 checks pass.
+and a profile-only row (no CRM info) still keeps its own AWL-ID. 305 checks pass.
 
 25. v3.7e - THE RESUME IS MIRRORED INTO SUPABASE SO RAILWAY CAN FETCH IT
 
@@ -1731,7 +1731,88 @@ copy (no re-download) and a clobbered pointer is restored from cache; with no AP
 resume it falls back to the table (via 'table'); a 403 download is reported and the
 pointer left intact; and no source at all is an honest no_resume_source - plus the
 sync / sync-one / DEV route wiring and the resume_mirrors schema on both dialects.
-283 checks pass.
+305 checks pass.
+
+26. v3.7f - FIVE-STAGE FIELD RESOLUTION, COMPANY EMAIL IS THE IDENTITY, AND
+      THE CA DASHBOARD OPENS IDENTITY-FIRST
+
+THE FIVE STAGES (draft-service.js runDraftPass). Every scanned field on
+  every applicant link is now resolved by a strict five-stage ladder, and
+  the ladder runs in one order with no back-tracking:
+
+    STAGE 1  DATABASE       (Tier 1 / 2 / 2.5) - resolveDerived + the
+                            semantic column mapper read applicants.profile_json,
+                            the CRM row that the sync wrote. The primary
+                            source of truth for identity + knock-out facts.
+    STAGE 2  CLIENT-API     get-client-details is fetched LIVE once per
+                            draft pass (memoized) and the derived rules
+                            replay against the fresh record. Catches a row
+                            whose CRM sync lagged behind the source table.
+    STAGE 3  RESUME PARSE   resumeShapeAnswer scans the applicant's own
+                            PDF for a clean text shape match (email / phone
+                            / URL / date) that neither the DB nor the API
+                            exposed. Model-free, so it survives a 429.
+    STAGE 4  FUZZY POOL     fuzzyMatchFromPool - the question text is
+                            matched against every key Stages 1-2 put on
+                            the map, so a column name the DERIVED_RULES
+                            missed still resolves deterministically.
+                            Precision-only: it refuses narrative questions,
+                            short questions, and any key under 5 chars.
+    STAGE 5  GENAI          generateFreeTextAnswer / generateChoiceAnswer
+                            - the model drafts only what none of the above
+                            could source (essays, "why are you interested",
+                            etc.). Always grounded on record + resume.
+
+  Stage 1-4 all write source='deterministic'; stage 5 writes source='genai'.
+  A field none of the five answered is 'missing_fact' (required) or
+  'placeholder' (optional), never silent. CA edits still short-circuit the
+  whole ladder - 'ca_edited' is authoritative and no stage may override it.
+
+COMPANY EMAIL IS THE IDENTITY (mandate). The client's COMPANY email is
+  now what every application carries. personal_email is only a safety net
+  for a legacy row that has no company_email yet. The order is asserted in
+  three code paths so it can never silently flip back:
+    - connector/applicant-db.js mapCombined picks (company_email, personal_email)
+    - connector/ca-data.js assigns row.company_email || row.personal_email
+    - ashby-hybrid-automation.js reads applicantPayload.company_email
+      || client.company_email || additional.company_email || ...personal_email
+  On the AI side, genai-resume-filler.js's buildRecordMap now registers
+  BOTH the 'personal_email' and the 'company_email' keys pointing at the
+  same authoritative value (which is now the CRM's company_email), and the
+  tier-1 email question regex covers "Company Email" / "Official Email" /
+  "Business Email" as well as "Personal Email" / "Work Email". Any spelling
+  a form uses resolves to the same value.
+
+THE CA DASHBOARD OPENS IDENTITY-FIRST (view-only, flow untouched).
+  public/js/app.js renderReviewPane now buckets the 4 identity rows
+  (first name, last name, phone, email) at the top of the review pane
+  under "Primary contact" and tucks every other pre-filled / AI-drafted /
+  needs-input / optional / info section behind a single "View application"
+  toggle. This is ONLY a display reduction:
+    - the 5-stage ladder still resolves every question server-side,
+    - updateApplyGate still uses state.blockers (the full count from the
+      server), so APPLY stays locked until the CA opens the toggle and
+      clears every unresolved question,
+    - the CA still edits + confirms every row exactly as before - the
+      change is that the 4 primary identity rows are visible without
+      the toggle, and the rest requires one click.
+  The identity classifier uses anchored question-text patterns so a
+  generic "Email preferences" or "Phone interview availability" caption
+  is never mistaken for an identity row.
+
+RULE, asserted in verify:flow step 15 (22 checks): mapCombined picks
+company_email first, and only falls back to personal_email when company
+is absent; ca-data.js and ashby-hybrid-automation.js prefer company_email;
+buildRecordMap registers BOTH email keys; the tier-1 email regex covers
+"Company Email"; draft-service.js imports clientDetails, fires Stage 2
+AFTER bound columns and BEFORE the resume tier, and Stage 4 AFTER the
+resume tier and BEFORE GenAI; the API fetch is memoized per pass; the
+fuzzyMatchFromPool helper fires on exact-spelling key matches (both
+directions) and refuses narrative questions, short questions, unrelated
+keys, and short-key-inside-word collisions; the CA reduced-view buckets
+identity rows into a "Primary contact" section, keeps every original
+section inside a "View application" toggle (nothing dropped), and still
+uses the server's blockers count for the APPLY gate. 305 checks pass.
 
 END OF CURRENT-STATE DOC (v3.7) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.

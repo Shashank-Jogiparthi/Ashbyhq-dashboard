@@ -82,7 +82,12 @@ function buildRecordMap(profile = {}) {
   add('gpa', a.gpa);
   add('desired_start_date', a.start_date);
   add('full_name', profile.personal?.name);
+  // Both keys resolve to profile.personal.email, which is the CLIENT'S
+  // COMPANY email (mapCombined now prefers company_email over personal_email).
+  // Registering the second spelling means any Ashby question that uses
+  // "Company Email" / "Work Email" hits the same authoritative value.
   add('personal_email', profile.personal?.email);
+  add('company_email', profile.personal?.email);
   add('callable_phone', profile.contact?.phone || profile.contact?.mobile);
   add('highest_education', (profile.education || []).join(' | '));
 
@@ -181,8 +186,8 @@ const DERIVED_RULES = [
   // preferences" etc.
   { re: /^(your\s+)?(full\s+)?name$/i, questionOnly: true,
     resolve: (m, p) => get(m, 'full_name', 'name') || p?.personal?.name || '' },
-  { re: /^(your\s+)?(personal|work)?\s*e[-\s]?mail(\s+address)?$/i, questionOnly: true,
-    resolve: (m, p) => get(m, 'personal_email', 'email') || p?.personal?.email || '' },
+  { re: /^(your\s+)?(personal|work|company|official|business|current)?\s*e[-\s]?mail(\s+address)?$/i, questionOnly: true,
+    resolve: (m, p) => get(m, 'company_email', 'personal_email', 'email') || p?.personal?.email || '' },
   // Phone box in any of its label spellings - "Phone", "Phone Number",
   // "Primary Phone", "Mobile Number", "Cell", "Contact Number", "WhatsApp",
   // "Best Number", etc. The old pattern was ^phone|mobile|contact number|

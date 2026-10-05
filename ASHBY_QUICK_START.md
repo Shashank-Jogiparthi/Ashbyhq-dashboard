@@ -410,7 +410,7 @@ has to open the URL to learn why there is nothing to fill.
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 283 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 305 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits
@@ -441,6 +441,17 @@ npm run verify:flow   # 283 assertions: gate per mode, defer/refund, hand-back +
                       # client-details API first, the CRM table as fallback, and only
                       # then an honest no_resume_source; a failed download never
                       # clobbers the pointer and a re-sync reuses the cached copy)
+                      # and the 5-stage field ladder (Stage 1 DB → Stage 2 live
+                      # client-API → Stage 3 resume parse → Stage 4 fuzzy pool
+                      # match → Stage 5 GenAI), with company_email as the
+                      # MANDATORY applicant identity (mapCombined + ca-data +
+                      # engine all prefer it; buildRecordMap exposes both keys;
+                      # a "Company Email" question resolves via the same tier-1
+                      # rule as "Personal Email") and the CA dashboard opening
+                      # identity-first (only first name / last name / phone /
+                      # company email visible by default; every other row lives
+                      # behind a "View application" toggle - display-only, the
+                      # APPLY gate still uses the server's full blockers count)
 ```
 
 ---

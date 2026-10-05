@@ -1574,6 +1574,92 @@ async function verifyResumeMirror() {
     /CREATE TABLE IF NOT EXISTS resume_mirrors/.test(sqlA) && /CREATE TABLE IF NOT EXISTS resume_mirrors/.test(sqlB));
 }
 
+async function verifyFiveStageAndIdentityFirst() {
+  step('15. 5-stage resolution (DB → client-API → resume → fuzzy → GenAI), company_email first, and the identity-first CA view');
+  const { mapCombined } = await import('../connector/applicant-db.js');
+  const { fuzzyMatchFromPool } = await import('../draft-service.js');
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const caDataSrc = fs.readFileSync(path.join(here, '..', 'connector', 'ca-data.js'), 'utf8');
+  const draftSrc = fs.readFileSync(path.join(here, '..', 'draft-service.js'), 'utf8');
+  const appSrc = fs.readFileSync(path.join(here, '..', 'public', 'js', 'app.js'), 'utf8');
+  const fillerSrc = fs.readFileSync(path.join(here, '..', '..', 'genai-resume-filler.js'), 'utf8');
+  const hybridSrc = fs.readFileSync(ENGINE_SCRIPT, 'utf8');
+
+  // --- EMAIL: company_email is MANDATORY, personal_email is only a legacy fallback.
+  const both = mapCombined(
+    { applywizz_id: 'AWL-VERIFY-15', full_name: 'X' },
+    { company_email: 'boss@x.co', personal_email: 'me@home.com', first_name: 'X', last_name: 'Y' }
+  );
+  check('mapCombined takes the client COMPANY email when both emails are on the row',
+    both.email === 'boss@x.co', `email=${both.email}`);
+  const personalOnly = mapCombined({ applywizz_id: 'AWL-VERIFY-15' }, { personal_email: 'only@me.com' });
+  check('...falls back to personal_email only when company_email is absent',
+    personalOnly.email === 'only@me.com', `email=${personalOnly.email}`);
+  const companyOnly = mapCombined({ applywizz_id: 'AWL-VERIFY-15' }, { company_email: 'only@co.io' });
+  check('...a row with only company_email resolves correctly', companyOnly.email === 'only@co.io');
+  check('ca-data.js assigns the applicant company_email to the internal applicant row',
+    /row\.company_email \|\| row\.personal_email/.test(caDataSrc));
+  check('ashby-hybrid-automation.js reads company_email BEFORE personal_email (both slots)',
+    /company_email \|\| client\.company_email \|\| additional\.company_email \|\| .*personal_email/.test(hybridSrc));
+  check('buildRecordMap exposes BOTH keys so any question spelling resolves to the same value',
+    /add\('personal_email', profile\.personal\?\.email\)/.test(fillerSrc) &&
+    /add\('company_email', profile\.personal\?\.email\)/.test(fillerSrc));
+  check('a "Company Email" question resolves via the same tier-1 rule that a "Personal Email" question uses',
+    /personal\|work\|company\|official\|business\|current/.test(fillerSrc));
+
+  // --- 5-STAGE ORDER inside draft-service.js (source-position check).
+  check('draft-service.js imports clientDetails from the connector (Stage 2 client-API source)',
+    /import \{ clientDetails \} from '\.\/connector\/external-apis\.js'/.test(draftSrc));
+  const iBound = draftSrc.indexOf("evidence: [`record column: ${boundKey}`]");
+  const iStage2 = draftSrc.lastIndexOf('STAGE 2 (client-API)');
+  const iResume = draftSrc.indexOf('Deterministic resume fallback');
+  const iStage4 = draftSrc.lastIndexOf('STAGE 4 (fuzzy pool match)');
+  const iGenai = draftSrc.indexOf('Tier 3: GenAI draft');
+  check('Stage 2 (client-API) fires AFTER bound columns and BEFORE the resume tier',
+    iBound > 0 && iStage2 > iBound && iResume > iStage2, `${iBound}/${iStage2}/${iResume}`);
+  check('Stage 4 (fuzzy pool match) fires AFTER the resume tier and BEFORE GenAI (Stage 5)',
+    iStage4 > iResume && iGenai > iStage4, `${iResume}/${iStage4}/${iGenai}`);
+  check('the client-API fetch is memoized per pass (one HTTP call, never one per field)',
+    /let apiMapStarted = false/.test(draftSrc) && /if \(apiMapStarted\) return apiMap/.test(draftSrc));
+
+  // --- fuzzyMatchFromPool behaviour (pure helper, no DB, no network).
+  const pool = {
+    linkedin: 'https://linkedin.com/in/verify-x',
+    portfolio_url: 'https://verify-x.dev',
+    first_name: 'Verify',
+    github: 'https://github.com/verify-x'
+  };
+  check('fuzzy match fires when the record key appears verbatim in the question',
+    fuzzyMatchFromPool('LinkedIn profile URL', pool) === 'https://linkedin.com/in/verify-x');
+  check('fuzzy match fires when the question is contained in the record key',
+    fuzzyMatchFromPool('Portfolio', pool) === 'https://verify-x.dev');
+  check('fuzzy match REFUSES narrative questions (must fall to GenAI)',
+    fuzzyMatchFromPool('Tell me about a project you are proud of', pool) === '');
+  check('fuzzy match REFUSES a question shorter than 4 characters',
+    fuzzyMatchFromPool('Who', pool) === '');
+  check('fuzzy match REFUSES a question that shares no token with any record key',
+    fuzzyMatchFromPool('Work authorization status', pool) === '');
+  check('fuzzy match never fires on a short key inside an unrelated word (word boundary)',
+    fuzzyMatchFromPool('Are you an avid reader', { id: 'xyz', avidness: 'yes' }) === '');
+
+  // --- CA reduced view (source inspection of app.js).
+  check('app.js classifies identity rows with anchored question-text patterns',
+    /const IDENTITY_TESTS =/.test(appSrc) && /function isIdentityRow/.test(appSrc));
+  const rvp = appSrc.slice(appSrc.indexOf('function renderReviewPane'));
+  check('renderReviewPane buckets the 4 identity rows to the top and tucks the rest behind "View application"',
+    /identity\.map\(\(r\) => fieldRow\(appId, r, identityMode\(r\)\)\)/.test(rvp) &&
+    /View application/.test(rvp));
+  check('the reduced view never DROPS a question - every original section still renders inside the toggle',
+    /review-sec review-full/.test(rvp) &&
+    /detRest\.map/.test(rvp) && /aiRest\.map/.test(rvp) &&
+    /gapsRest\.map/.test(rvp) && /optRest\.map/.test(rvp) && /infoRest\.map/.test(rvp));
+  check('APPLY gate still counts every unresolved question (server-side blockers, not the reduced display)',
+    /updateApplyGate\(a\.id, state\.blockers, true\)/.test(appSrc));
+  check('a required identity row the draft pass could not fill still renders with the "required" mode',
+    /identityMode\(r\)[\s\S]{0,120}source === 'missing_fact'/.test(appSrc) ||
+    /const identityMode = \(r\) => \(r\.source === 'missing_fact'/.test(appSrc));
+}
+
 async function verifyCrmFetch() {
   step('6. CRM fetch (--crm only; needs the Azure connection)');
   const { isConfigured, syncApplicantByAwl } = await import('../connector/applicant-db.js');
@@ -1604,6 +1690,7 @@ try {
   await verifySubmissionProof();
   await verifyDetectionHardening();
   await verifyResumeMirror();
+  await verifyFiveStageAndIdentityFirst();
   if (process.argv.includes('--crm')) await verifyCrmFetch();
 } catch (err) {
   failed += 1;
