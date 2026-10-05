@@ -410,7 +410,7 @@ has to open the URL to learn why there is nothing to fill.
 **Before shipping**, from the repo root:
 
 ```bash
-npm run verify:flow   # 308 assertions: gate per mode, defer/refund, hand-back +
+npm run verify:flow   # 345 assertions: gate per mode, defer/refund, hand-back +
                       # park, cache provenance, junk refusal, publish path, workers,
                       # resume-source attribution, one CRM name list, idempotent
                       # staff-directory seed + CA/OM sign-in scoping + per-CA limits
@@ -448,10 +448,19 @@ npm run verify:flow   # 308 assertions: gate per mode, defer/refund, hand-back +
                       # engine all prefer it; buildRecordMap exposes both keys;
                       # a "Company Email" question resolves via the same tier-1
                       # rule as "Personal Email") and the CA dashboard opening
-                      # identity-first (only first name / last name / phone /
-                      # company email visible by default; every other row lives
-                      # behind a "View application" toggle - display-only, the
-                      # APPLY gate still uses the server's full blockers count)
+                      # identity-first: by default the pane shows ONLY the four
+                      # identity CATEGORIES (any name / phone / email variant
+                      # the specific Ashby form uses), and every other row
+                      # lives behind a dedicated "👁 View all" button on the
+                      # card's action bar (next to Review answers / APPLY /
+                      # Skip). Clicking "View all" expands the pane into a
+                      # FLAT list of every question in the FORM'S OWN
+                      # SEQUENCE (sorted by sort_order, not grouped by our
+                      # internal source tags); clicking again collapses back
+                      # to the four identity rows. Display-only: the APPLY
+                      # gate still uses the server's blockers count, so APPLY
+                      # stays locked the same way whether the CA is looking
+                      # at 4 rows or 40.
 ```
 
 ---

@@ -1651,18 +1651,55 @@ async function verifyFiveStageAndIdentityFirst() {
   // --- CA reduced view (source inspection of app.js).
   check('app.js classifies identity rows with anchored question-text patterns',
     /const IDENTITY_TESTS =/.test(appSrc) && /function isIdentityRow/.test(appSrc));
+  // The classifier lives as an array of regex literals in the source. Compile
+  // them at verify time so a rewrite that narrows (or accidentally broadens)
+  // the pattern set fails this check, not just any structural grep below.
+  const idTestBlock = appSrc.slice(
+    appSrc.indexOf('const IDENTITY_TESTS ='),
+    appSrc.indexOf('function isIdentityRow')
+  );
+  const idPatternSrc = (idTestBlock.match(/\/(?:\\.|[^\/\r\n])+\/i/g) || []);
+  const idTests = idPatternSrc.map((s) => new RegExp(s.slice(1, -2), 'i'));
+  check('identity classifier compiles at least 3 patterns (name, phone, email)',
+    idTests.length >= 3);
+  ['First name', 'Last name (required)', 'Full legal name', 'Preferred name',
+    'Middle name', 'Maiden name', 'Surname', 'Family name',
+    'Phone', 'Primary phone', 'Mobile number', 'Contact number',
+    'WhatsApp', 'Cell phone (required)', 'Telephone number',
+    'Email', 'Email address', 'Company email', 'Work email',
+    'Personal email', 'Alternate e-mail'
+  ].forEach((q) => check(`identity classifier ACCEPTS "${q}"`,
+    idTests.some((re) => re.test(q))));
+  ['Email preferences', 'Email notifications', 'Company Name',
+    'Phone interview availability', 'Desired start date',
+    'LinkedIn profile URL', 'Why do you want this role?',
+    'Contact information', 'Preferred contact method', 'Number of years of experience'
+  ].forEach((q) => check(`identity classifier REFUSES "${q}" (not a raw identity field)`,
+    !idTests.some((re) => re.test(q))));
+
   const rvp = appSrc.slice(appSrc.indexOf('function renderReviewPane'));
-  check('renderReviewPane buckets the 4 identity rows to the top and tucks the rest behind "View application"',
-    /identity\.map\(\(r\) => fieldRow\(appId, r, identityMode\(r\)\)\)/.test(rvp) &&
-    /View application/.test(rvp));
-  check('the reduced view never DROPS a question - every original section still renders inside the toggle',
-    /review-sec review-full/.test(rvp) &&
-    /detRest\.map/.test(rvp) && /aiRest\.map/.test(rvp) &&
-    /gapsRest\.map/.test(rvp) && /optRest\.map/.test(rvp) && /infoRest\.map/.test(rvp));
+  check('the queue card action bar carries a dedicated "View all" button beside Review / APPLY / Skip',
+    new RegExp('id="viewall-\\$\\{a\\.id\\}"').test(appSrc) &&
+    /👁 View all/.test(appSrc));
+  check('clicking "View all" flips state.expanded and re-renders the SAME pane (no refetch)',
+    /st\.expanded = !st\.expanded/.test(appSrc) &&
+    /renderReviewPane\(a\.id, st\)/.test(appSrc));
+  check('compact (default) mode renders ONLY identity rows - nothing else visible',
+    /const expanded = state\.expanded === true/.test(rvp) &&
+    /if \(!expanded\)[\s\S]{0,600}identity\.map\(\(r\) => fieldRow\(appId, r, identityMode\(r\)\)\)/.test(rvp) &&
+    /review-sec review-primary/.test(rvp));
+  check('expanded mode lists EVERY question in the FORM\'S OWN SEQUENCE (sorted by sort_order)',
+    /\.sort\(\(a, b\) => \(a\.sort_order \?\? 0\) - \(b\.sort_order \?\? 0\)\)/.test(rvp) &&
+    /everything\.map\(\(r\) => fieldRow\(appId, r, expandedMode\(r\)\)\)/.test(rvp));
+  check('closing the review pane also hides the card "View all" toggle',
+    /toggleReview[\s\S]{0,600}viewAllBtn\.classList\.add\('hidden'\)/.test(appSrc));
+  check('the "View all" toggle becomes visible only once the pane has loaded',
+    /viewAllBtn\.classList\.remove\('hidden'\)/.test(rvp));
+  check('the reduced view never DROPS a question - expanded mode still uses the full review-sec container',
+    /review-sec review-full/.test(rvp));
   check('APPLY gate still counts every unresolved question (server-side blockers, not the reduced display)',
     /updateApplyGate\(a\.id, state\.blockers, true\)/.test(appSrc));
   check('a required identity row the draft pass could not fill still renders with the "required" mode',
-    /identityMode\(r\)[\s\S]{0,120}source === 'missing_fact'/.test(appSrc) ||
     /const identityMode = \(r\) => \(r\.source === 'missing_fact'/.test(appSrc));
 }
 

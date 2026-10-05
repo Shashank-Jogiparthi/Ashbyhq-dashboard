@@ -332,6 +332,21 @@ function drawQueue(awlId, applications, pendingLinks = []) {
     const reviewBtn = $(`review-toggle-${a.id}`);
     if (reviewBtn) reviewBtn.addEventListener('click', () => toggleReview(a));
 
+    // "View all" flips the pane between the identity-only compact view (the
+    // four primary fields: name / phone / email in any label spelling) and
+    // the full sectioned view. It's a display toggle only: the 5-stage draft
+    // pass already resolved every question, and the APPLY gate still uses
+    // the server's blockers count, so APPLY stays locked the same way
+    // whether the CA is looking at 4 rows or 40.
+    const viewAllBtn = $(`viewall-${a.id}`);
+    if (viewAllBtn) viewAllBtn.addEventListener('click', () => {
+      const st = REVIEW_STATE.get(a.id);
+      if (!st || !st.loaded) return;
+      st.expanded = !st.expanded;
+      REVIEW_STATE.set(a.id, st);
+      renderReviewPane(a.id, st);
+    });
+
     const skipBtn = $(`skip-${a.id}`);
     if (skipBtn) skipBtn.addEventListener('click', () => {
       const box = $(`reason-${a.id}`);
@@ -402,6 +417,7 @@ function queueCard(a, isCa) {
     ${isCa && !decided ? `
       <div class="actions">
         <button id="review-toggle-${a.id}">📝 Review answers</button>
+        <button id="viewall-${a.id}" class="hidden" title="Show every question, pre-filled answer, AI draft, and item still needing input">👁 View all</button>
         <button class="green" id="apply-${a.id}" disabled title="Open the review pane first">✔ APPLY for this applicant</button>
         <button class="danger" id="skip-${a.id}">✖ SKIP</button>
       </div>
@@ -423,13 +439,20 @@ function queueCard(a, isCa) {
    and wires change events to POST /answers/edit so every edit is persisted
    immediately. APPLY is enabled only once blockers == 0 and the pane has
    been opened at least once. */
-const REVIEW_STATE = new Map(); // appId -> { groups, blockers, scanned, loaded }
+const REVIEW_STATE = new Map(); // appId -> { groups, blockers, scanned, loaded, expanded }
 const SCAN_RETRY = new Map();   // appId -> auto-retry attempts while a scan runs
 
 async function toggleReview(a) {
   const pane = $(`review-${a.id}`);
   if (!pane) return;
-  if (!pane.classList.contains('hidden')) { pane.classList.add('hidden'); return; }
+  const viewAllBtn = $(`viewall-${a.id}`);
+  if (!pane.classList.contains('hidden')) {
+    pane.classList.add('hidden');
+    // Pane closed: hide the card's View all toggle too so the CA is not
+    // looking at a button whose target isn't on screen.
+    if (viewAllBtn) viewAllBtn.classList.add('hidden');
+    return;
+  }
   pane.classList.remove('hidden');
   await loadReview(a);
 }
@@ -524,17 +547,24 @@ function updateApplyGate(appId, blockers, loaded) {
   else { btn.disabled = false; btn.title = ''; }
 }
 
-/* The four questions that always stay visible in the CA review pane, so the
-   operator can confirm the applicant's identity at a glance. Everything else
-   the draft pass resolved lives behind the "View application" toggle. The
-   test reads the ROW's own question text (not the field_key) because Ashby
-   labels vary per link; anchored + narrow so it never sweeps up a generic
-   "Email preferences" or "Phone interview" question. */
+/* The four identity CATEGORIES that always stay visible in the CA review
+   pane's compact mode: name / phone / email in whatever spelling the specific
+   Ashby form uses. Anchored + strict so a generic "Email preferences",
+   "Phone interview availability" or "Company Name" caption is never swept
+   into the primary card. Any question about NAME (first, last, middle,
+   maiden, full, legal, preferred, given, family, surname, real) counts as
+   identity; any question about PHONE (mobile, cell, telephone, whatsapp,
+   callable, best number, contact number, work/personal phone) counts; any
+   question about EMAIL (personal, work, company, official, business,
+   primary, alternate) counts. Everything else lives behind the card's
+   "View all" toggle. */
 const IDENTITY_TESTS = [
-  /^\s*(your\s+)?first\s*name\s*\(?(required|optional)?\)?\s*$/i,
-  /^\s*(your\s+)?(last|family|sur)\s*name\s*\(?(required|optional)?\)?\s*$/i,
-  /^\s*(your\s+|the\s+)?(primary\s+|alternate\s+|mobile\s+|cell\s+|contact\s+|callable\s+|preferred\s+)?(phone|telephone|whatsapp|mobile)(\s*(number|no\.?|#))?\s*$/i,
-  /^\s*(your\s+)?(personal|work|company|official|business)?\s*e[-\s]?mail(\s+address)?\s*$/i
+  // Name slot — one or more accepted qualifiers + "name"/"surname".
+  /^\s*(?:your\s+|the\s+)?(?:(?:first|last|middle|maiden|full|given|family|sur|preferred|legal|real|complete|current|primary|my)\s+)*(?:name|surname)\s*(?:\(\s*(?:required|optional)\s*\))?\s*$/i,
+  // Phone slot — the phone-core noun is required, so an unrelated "Number" box never matches.
+  /^\s*(?:your\s+|the\s+)?(?:primary\s+|alternate\s+|mobile\s+|cell\s+|callable\s+|preferred\s+|best\s+|work\s+|personal\s+|home\s+|office\s+)?(?:phone|telephone|whatsapp|mobile|cell|tel|contact\s*(?:phone|number|no\.?|#))(?:\s*(?:number|no\.?|#))?\s*(?:\(\s*(?:required|optional)\s*\))?\s*$/i,
+  // Email slot — anchored so "Email preferences" / "Email notifications" fall through.
+  /^\s*(?:your\s+|the\s+)?(?:personal|work|company|official|business|current|primary|alternate)?\s*e[-\s]?mail(?:\s+(?:address|id))?\s*(?:\(\s*(?:required|optional)\s*\))?\s*$/i
 ];
 function isIdentityRow(r) {
   const q = String((r && (r.question_text || r.question)) || '').trim();
@@ -548,7 +578,7 @@ function renderReviewPane(appId, state) {
   const g = state.groups || {};
   const det = [...(g.deterministic || []), ...(g.placeholder || [])];
   const ai = [...(g.genai || []), ...(g.ca_edited || [])];
-  // "Needs your input" is every question the automation could NOT answer. That now
+  // "Needs your input" is every question the automation could NOT answer. That
   // includes questions the form asks that no draft pass ever reached
   // (source = needs_input): they must be visible and typeable, never silently
   // dropped, or the CA is left staring at a locked APPLY with no reason.
@@ -556,36 +586,47 @@ function renderReviewPane(appId, state) {
   const gaps = allGaps.filter((r) => !r.optional);
   const optionalGaps = allGaps.filter((r) => r.optional);
   const info = [...(g.not_applicable || []), ...(g.stale || [])];
-  // REDUCED DEFAULT VIEW. The CA sees the four identity fields first
-  // (first name, last name, phone, email) - the values that must never be
-  // wrong - and every other pre-filled / AI-drafted / gap row is tucked
-  // behind a single "View application" toggle. Nothing about the flow
-  // changes: the 5-stage draft pass still resolves the full set server-side
-  // and updateApplyGate() still counts every blocker, so APPLY stays locked
-  // until the CA opens the toggle and clears what still needs input.
-  const identity = [];
-  const detRest = []; const aiRest = []; const gapsRest = []; const optRest = []; const infoRest = [];
-  const bucket = (r, into) => (isIdentityRow(r) ? identity : into).push(r);
-  det.forEach((r) => bucket(r, detRest));
-  ai.forEach((r) => bucket(r, aiRest));
-  gaps.forEach((r) => bucket(r, gapsRest));
-  optionalGaps.forEach((r) => bucket(r, optRest));
-  info.forEach((r) => bucket(r, infoRest));
-  // Identity rows keep their real input mode so CA can still edit unknowns
-  // and confirm knowns. Anything the draft left open is required.
+  // Every row, deduped, in the FORM's own question order. This is what the
+  // expanded "View all" mode shows so the CA reads the application in the
+  // sequence Ashby actually asks it, not grouped by our internal source tags.
+  const everything = [...det, ...ai, ...gaps, ...optionalGaps, ...info]
+    .slice().sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  // Identity = any question that IS the applicant's name / phone / email,
+  // regardless of the exact label the specific Ashby form uses. Compact mode
+  // shows ONLY these rows; nothing else is visible until the CA clicks
+  // "View all" on the card's action bar.
+  const identity = everything.filter(isIdentityRow);
   const identityMode = (r) => (r.source === 'missing_fact' || r.source === 'needs_input') ? 'required' : 'edit';
-  const openGaps = gapsRest.filter((r) => !r.value).length;
-  const restTotal = detRest.length + aiRest.length + gapsRest.length + optRest.length + infoRest.length;
-  pane.innerHTML = `
-    ${identity.length ? `<details class="review-sec review-primary" open><summary>👤 Primary contact (${identity.length}) — first name, last name, phone, company email</summary>${identity.map((r) => fieldRow(appId, r, identityMode(r))).join('')}</details>` : ''}
-    ${restTotal ? `<details class="review-sec review-full"><summary>📄 View application (${restTotal} more question${restTotal === 1 ? '' : 's'}) — pre-filled answers, AI drafts, and items that still need you</summary>
-      ${detRest.length ? `<details class="review-sec review-a"><summary>✓ Auto-filled from profile (${detRest.length}) — tap to review / edit</summary>${detRest.map((r) => fieldRow(appId, r, 'edit')).join('')}</details>` : ''}
-      ${aiRest.length ? `<details class="review-sec review-b" open><summary>✍️ AI-drafted — please review (${aiRest.length})</summary>${aiRest.map((r) => fieldRow(appId, r, 'edit')).join('')}</details>` : ''}
-      ${gapsRest.length ? `<details class="review-sec review-c" open><summary>❗ Needs your input (${openGaps})</summary>${gapsRest.map((r) => fieldRow(appId, r, 'required')).join('')}</details>` : ''}
-      ${optRest.length ? `<details class="review-sec review-o"><summary>◽ Optional (${optRest.length}) — leave blank to skip</summary>${optRest.map((r) => fieldRow(appId, r, 'optional')).join('')}</details>` : ''}
-      ${infoRest.length ? `<details class="review-sec review-i"><summary>ℹ Not a typed question (${infoRest.length}) — upload / no longer on the form</summary>${infoRest.map((r) => fieldRow(appId, r, 'readonly')).join('')}</details>` : ''}
-    </details>` : ''}
-    ${!identity.length && !restTotal ? '<div class="muted">No fields resolved. Try re-running the scan + draft.</div>' : ''}`;
+  const expanded = state.expanded === true;
+
+  // Sync the card-level "View all" button with the current display.
+  const viewAllBtn = document.getElementById(`viewall-${appId}`);
+  if (viewAllBtn) {
+    viewAllBtn.classList.remove('hidden');
+    viewAllBtn.textContent = expanded ? '👁 View less' : '👁 View all';
+    viewAllBtn.title = expanded
+      ? 'Collapse back to the four identity fields (name, phone, email)'
+      : `Show every question the form asks (${everything.length}), in the sequence the application page asks them`;
+  }
+
+  if (!expanded) {
+    // COMPACT (default): the four identity fields ONLY. Nothing else visible.
+    pane.innerHTML = identity.length
+      ? `<div class="review-sec review-primary"><div class="review-primary-head">👤 Primary contact (${identity.length}) — name, phone, company email</div>${identity.map((r) => fieldRow(appId, r, identityMode(r))).join('')}</div>`
+      : '<div class="muted">This form has no name / phone / email question. Click "View all" to see what it does ask.</div>';
+  } else {
+    // EXPANDED: every question in FORM ORDER (the sequence Ashby asks them).
+    // Sections are gone because the CA asked for the same reading experience
+    // as filling the application manually. The blockers count still gates
+    // APPLY server-side, so no unresolved question can slip through.
+    const openGaps = everything.filter((r) => !r.value
+      && (r.source === 'missing_fact' || r.source === 'needs_input') && !r.optional).length;
+    pane.innerHTML = `<div class="review-sec review-full">
+      <div class="review-primary-head">📄 Full application — ${everything.length} question${everything.length === 1 ? '' : 's'} in the order the application page asks them${openGaps ? ` · ${openGaps} still need${openGaps === 1 ? 's' : ''} input` : ''}</div>
+      ${everything.map((r) => fieldRow(appId, r, expandedMode(r))).join('')}
+      ${!everything.length ? '<div class="muted">No fields resolved. Try re-running the scan + draft.</div>' : ''}
+    </div>`;
+  }
   pane.querySelectorAll('[data-field-key]').forEach((el) => {
     el.addEventListener('change', () => onAnswerEdit(appId, el));
   });
@@ -597,6 +638,19 @@ function renderReviewPane(appId, state) {
       await onAnswerEdit(appId, { dataset: { fieldKey: key }, value: 'N/A' });
     });
   });
+}
+
+/* Field-input mode for the flat expanded view. Compact view is always
+   identity so it uses identityMode; expanded view mixes everything, so the
+   mode is picked off the row's own source + optional flag. Same semantics
+   the sectioned view used, just on a flat list. */
+function expandedMode(r) {
+  if (r.source === 'not_applicable' || r.source === 'stale') return 'readonly';
+  if (!r.value) {
+    if (r.source === 'missing_fact' || r.source === 'needs_input') return r.optional ? 'optional' : 'required';
+    if (r.source === 'placeholder') return 'optional';
+  }
+  return 'edit';
 }
 
 // Question label for the CA review: when a GenAI gist exists (long questions /
