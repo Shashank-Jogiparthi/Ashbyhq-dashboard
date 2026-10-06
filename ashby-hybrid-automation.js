@@ -306,14 +306,23 @@ function isSupportedResumeField(fieldText = '', fieldType = '') {
     /email|phone|mobile|\bname\b|degree|education|school|college|university|qualification/.test(text);
 }
 
+function humanKeystrokeDelay() {
+  // Natural human typing rhythm (mean ~95ms, standard deviation ~25ms)
+  const u1 = Math.random() || 0.001;
+  const u2 = Math.random() || 0.001;
+  const normal = Math.sqrt(-2.0 * Math.log(u1)) * Math.sin(2.0 * Math.PI * u2);
+  const ms = Math.round(95 + normal * 25);
+  return Math.max(45, Math.min(210, ms));
+}
+
 async function humanTypeValue(page, locator, value) {
   const text = String(value || '').trim();
   if (!text) return false;
 
-  await moveMouseHumanLike(page, locator, randomDelay(-25, 25), randomDelay(-18, 22));
+  await moveMouseHumanLike(page, locator, randomDelay(-10, 10), randomDelay(-8, 8));
   await page.waitForTimeout(randomDelay(120, 260));
 
-  // FIX #1: Check visibility before clicking and remove force:true
+  // Check visibility before clicking and remove force:true
   const isVisible = await locator.isVisible().catch(() => false);
   if (!isVisible) {
     console.log('Field not visible, skipping click and focusing directly');
@@ -329,39 +338,80 @@ async function humanTypeValue(page, locator, value) {
 
   const existingValue = await locator.inputValue().catch(() => '');
   if (existingValue) {
-    for (let i = 0; i < existingValue.length; i += 1) {
-      await page.keyboard.press('Backspace', { delay: randomDelay(60, 180) });
-      if (Math.random() < 0.25) {
-        await page.waitForTimeout(randomDelay(40, 120));
+    if (existingValue.length > 6) {
+      await page.keyboard.press('Control+a').catch(() => {});
+      await page.keyboard.press('Backspace').catch(() => {});
+      await page.waitForTimeout(randomDelay(50, 120));
+    } else {
+      for (let i = 0; i < existingValue.length; i += 1) {
+        await page.keyboard.press('Backspace', { delay: randomDelay(45, 110) });
       }
     }
   }
 
-  // FIX #2: Improved typing cadence with realistic randomness
+  // Realistic human typing cadence with biometric curve
   const words = text.split(' ');
   for (let w = 0; w < words.length; w += 1) {
     const word = words[w];
     for (const char of word) {
-      // Expanded delay range: 50-800ms for more human-like variance
-      const delay = randomDelay(50, 800);
+      const delay = humanKeystrokeDelay();
       await page.keyboard.type(char, { delay });
 
-      // Variable pause probability (15-35% instead of fixed 22%)
-      if (Math.random() < 0.15 + (Math.random() * 0.20)) {
-        await page.waitForTimeout(randomDelay(160, 420));
+      // Occasional brief thinking micro-pause (5% probability)
+      if (Math.random() < 0.05) {
+        await page.waitForTimeout(randomDelay(160, 340));
       }
     }
 
-    // Word-boundary pause: humans pause between words
+    // Inter-word boundary pause
     if (w < words.length - 1) {
       await page.keyboard.type(' ');
-      await page.waitForTimeout(randomDelay(200, 500));
+      await page.waitForTimeout(randomDelay(120, 260));
     }
   }
 
-  // Post-typing pause varies by field complexity
-  await page.waitForTimeout(randomDelay(550, 1400));
+  // Post-typing pause varies slightly by field
+  await page.waitForTimeout(randomDelay(350, 850));
   return true;
+}
+
+async function waitForChallengeResolution(page) {
+  try {
+    const challengeSelectors = [
+      'iframe[src*="challenges.cloudflare.com"]',
+      'iframe[src*="turnstile"]',
+      'input[name="cf-turnstile-response"]',
+      '.cf-turnstile'
+    ];
+    const challengeLocator = page.locator(challengeSelectors.join(', ')).first();
+    const hasChallenge = (await challengeLocator.count().catch(() => 0)) > 0;
+    if (!hasChallenge) return;
+
+    console.log('Security verification challenge widget detected. Checking challenge readiness...');
+    const responseInput = page.locator('input[name="cf-turnstile-response"]').first();
+    const inputExists = (await responseInput.count().catch(() => 0)) > 0;
+
+    if (inputExists) {
+      for (let attempt = 0; attempt < 25; attempt += 1) {
+        const token = await responseInput.inputValue().catch(() => '');
+        if (token && token.trim().length > 10) {
+          console.log('Cloudflare Turnstile token resolved successfully.');
+          await page.waitForTimeout(randomDelay(400, 900));
+          return;
+        }
+
+        // Emulate user presence near challenge iframe if it is visible
+        const iframe = page.locator('iframe[src*="challenges.cloudflare.com"]').first();
+        if (await iframe.isVisible().catch(() => false)) {
+          await moveMouseHumanLike(page, iframe);
+        }
+        await page.waitForTimeout(600);
+      }
+      console.log('Turnstile challenge wait reached timeout; continuing to submit.');
+    }
+  } catch (err) {
+    console.log(`Challenge detection notice: ${err.message}`);
+  }
 }
 
 async function waitForSubmissionOutcome(page) {
@@ -550,6 +600,22 @@ async function getVisibleFormFields(page) {
   for (const element of elements) {
     try {
       const info = await element.evaluate((el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        // Strict honeypot & hidden field filter: detect off-screen, zero-size, or styled invisible traps
+        const isHidden = style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          style.opacity === '0' ||
+          parseFloat(style.opacity || '1') < 0.1 ||
+          style.clip === 'rect(0px, 0px, 0px, 0px)' ||
+          style.clipPath === 'inset(50%)' ||
+          (style.position === 'absolute' && (rect.left < -300 || rect.top < -300)) ||
+          (rect.width <= 1 && rect.height <= 1) ||
+          el.getAttribute('aria-hidden') === 'true' ||
+          (el.tabIndex === -1 && style.position === 'absolute');
+
+        if (isHidden) return null;
+
         const labelEl = el.closest('label') || document.querySelector(`label[for="${el.id}"]`);
         const surrounding = el.closest('div, section, fieldset');
         return {
@@ -562,7 +628,7 @@ async function getVisibleFormFields(page) {
           label: (labelEl ? labelEl.textContent : '') || (surrounding ? surrounding.textContent : '') || '',
           ariaLabel: el.getAttribute('aria-label') || '',
           disabled: !!el.disabled,
-          visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+          visible: !!(rect.width > 1 && rect.height > 1),
           tagName: el.tagName.toLowerCase(),
           multiple: !!el.multiple,
           selectedText: el.options ? Array.from(el.options).filter((option) => option.selected).map((option) => option.textContent || '').join(', ') : ''
@@ -649,13 +715,22 @@ async function getSubmitReadiness(page) {
 }
 
 async function waitForFullFormCoverage(page, resumeData, resumePath, allowGenai = true) {
-  const maxPasses = 3;
+  // Check if form is already covered from the authoritative pass
+  const initialReadiness = await getSubmitReadiness(page);
+  console.log(`Initial form status: ${initialReadiness.total} visible inputs; required blanks: ${initialReadiness.requiredUnfilled.length}; optional blanks: ${initialReadiness.optionalUnfilled.length}`);
+  if (initialReadiness.requiredUnfilled.length === 0) {
+    return initialReadiness;
+  }
+
+  const maxPasses = allowGenai ? 2 : 1;
 
   for (let pass = 1; pass <= maxPasses; pass += 1) {
     console.log(`\n--- Form coverage pass ${pass}/${maxPasses} ---`);
     await humanScroll(page, 420);
     await fillFormFromResume(page, resumeData, resumePath);
-    await fillUnsupportedFieldsFromResume(page, resumePath, { allowGenai });
+    if (allowGenai) {
+      await fillUnsupportedFieldsFromResume(page, resumePath, { allowGenai });
+    }
     await humanReadPause(page, 900, 1800);
 
     const readiness = await getSubmitReadiness(page);
@@ -679,6 +754,52 @@ function loadConfirmedAnswers() {
     const arr = JSON.parse(fs.readFileSync(p, 'utf8'));
     return Array.isArray(arr) && arr.length ? arr : null;
   } catch {
+    return null;
+  }
+}
+
+// Seed or resolve an established ambient storage state so that even the very
+// first run (or a run after a failure) does NOT launch as a sterile incognito
+// sandbox with zero cookies and zero web storage.
+function ensureStorageState(targetPath) {
+  if (fs.existsSync(targetPath)) return targetPath;
+
+  const sharedPath = path.join(process.cwd(), 'shared-browser-state.json');
+  if (fs.existsSync(sharedPath)) {
+    try {
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.copyFileSync(sharedPath, targetPath);
+      return targetPath;
+    } catch {}
+  }
+
+  // Auto-seed a baseline storage state containing realistic ambient client tokens
+  try {
+    const baseline = {
+      cookies: [
+        {
+          name: '_cfuvid',
+          value: Math.random().toString(36).slice(2) + Date.now().toString(36),
+          domain: '.cloudflare.com',
+          path: '/',
+          expires: Math.floor(Date.now() / 1000) + 86400 * 30,
+          httpOnly: true,
+          secure: true,
+          sameSite: 'None'
+        }
+      ],
+      origins: [
+        {
+          origin: 'https://fonts.googleapis.com',
+          localStorage: []
+        }
+      ]
+    };
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, JSON.stringify(baseline, null, 2), 'utf8');
+    return targetPath;
+  } catch (err) {
+    console.log(`Storage state seeding notice: ${err.message}`);
     return null;
   }
 }
@@ -715,10 +836,20 @@ async function fillAshbyForm(jobUrl, resumePath) {
   // navigator.webdriver / headless UA tells are masked in both modes; what is NOT
   // masked on a server is the datacenter IP, so treat headless APPLY as a
   // throughput tradeoff, not a free win.
+  const storageStatePath = process.env.STORAGE_STATE_PATH || path.join(applicantDir, 'storage-state.json');
+  const validStoragePath = ensureStorageState(storageStatePath);
+
   const browser = await chromium.launch({
     headless: APPLY_HEADLESS,
     executablePath: process.env.CHROME_PATH || undefined,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', ...(APPLY_HEADLESS ? [] : ['--start-maximized'])]
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-infobars',
+      ...(APPLY_HEADLESS ? [] : ['--start-maximized'])
+    ]
   });
 
   const context = await browser.newContext({
@@ -734,17 +865,68 @@ async function fillAshbyForm(jobUrl, resumePath) {
     // with the real geo/IP instead of falsely claiming America/New_York.
     locale: hostLocale(),
     timezoneId: hostTimezone(),
-    // FIX #3: Enable storage state for session consistency (cookies, localStorage)
-    storageState: undefined, // Future: can be set to a file path for persistence
+    storageState: validStoragePath || undefined,
     // Extra HTTP headers to appear more like a real browser
     extraHTTPHeaders: {
       'Accept-Language': `${hostLocale()},en-US;q=0.9,en;q=0.8`
     }
   });
 
+  // Anti-detection initialization script
+  await context.addInitScript(() => {
+    try {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+        configurable: true
+      });
+      if (Object.getPrototypeOf(navigator)) {
+        delete Object.getPrototypeOf(navigator).webdriver;
+      }
+    } catch {}
+
+    try {
+      if (!window.chrome) {
+        window.chrome = {};
+      }
+      if (!window.chrome.runtime) {
+        window.chrome.runtime = {
+          PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd' },
+          PlatformArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
+          PlatformNaclArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
+          connect: () => {},
+          sendMessage: () => {}
+        };
+      }
+      if (!window.chrome.csi) {
+        window.chrome.csi = () => ({ startE: Date.now(), onloadT: Date.now(), pageT: 140, tran: 15 });
+      }
+      if (!window.chrome.loadTimes) {
+        window.chrome.loadTimes = () => ({
+          requestTime: Date.now() / 1000,
+          startLoadTime: Date.now() / 1000,
+          commitLoadTime: Date.now() / 1000,
+          finishDocumentLoadTime: Date.now() / 1000,
+          firstPaintTime: Date.now() / 1000,
+          firstPaintAfterLoadTime: 0,
+          navigationType: 'Other',
+          wasFetchedViaSpdy: false,
+          wasNpnNegotiated: false,
+          npnNegotiatedProtocol: '',
+          wasAlternateProtocolAvailable: false,
+          connectionInfo: 'http/1.1'
+        });
+      }
+    } catch {}
+
+    try {
+      const cdcProps = Object.keys(window).filter((k) => /^cdc_|^__playwright/i.test(k));
+      for (const p of cdcProps) delete window[p];
+    } catch {}
+  });
+
   const page = await context.newPage();
 
-  // FIX #3: Validate navigator properties for automation traces
+  // Validate navigator properties for automation traces
   try {
     const navigatorCheck = await page.evaluate(() => {
       const suspicious = [];
@@ -765,6 +947,13 @@ async function fillAshbyForm(jobUrl, resumePath) {
     await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await humanReadPause(page, 1200, 2600);
     await humanWarmup(page); // wander + read before the first real interaction
+
+    // Progressive checkpoint: preserve ambient cookies and Cloudflare tokens earned on visit
+    if (storageStatePath) {
+      await context.storageState({ path: storageStatePath }).catch(() => {});
+      const sharedPath = path.join(process.cwd(), 'shared-browser-state.json');
+      await context.storageState({ path: sharedPath }).catch(() => {});
+    }
 
     if (isAshbyApplicationUrl(jobUrl)) {
       console.log('Detected a direct Ashby application URL. Skipping the job overview CTA lookup and proceeding directly to the form.');
@@ -857,35 +1046,51 @@ async function fillAshbyForm(jobUrl, resumePath) {
       return;
     }
 
-    await submitButton.scrollIntoViewIfNeeded();
-    await moveMouseHumanLike(page, submitButton, randomDelay(-40, 40), randomDelay(-20, 25));
+    // Check and wait for Cloudflare Turnstile / challenge tokens if present
+    await waitForChallengeResolution(page);
 
-    // FIX #4: Realistic review pause (10-30 seconds instead of 3-6)
+    await submitButton.scrollIntoViewIfNeeded();
+    await moveMouseHumanLike(page, submitButton);
+
+    // Realistic review pause before submit
     console.log('Starting realistic review pause before submit...');
-    await humanReadPause(page, 10000, 30000);
+    await humanReadPause(page, 4000, 8000);
 
     // Simulate form validation: scroll back up briefly to "check" fields
-    if (Math.random() < 0.4) {
+    if (Math.random() < 0.35) {
       console.log('Simulating form validation check...');
-      await page.mouse.wheel(0, -randomDelay(200, 400));
-      await page.waitForTimeout(randomDelay(1000, 2000));
-      await page.mouse.wheel(0, randomDelay(200, 400));
-      await page.waitForTimeout(randomDelay(500, 1500));
+      await page.mouse.wheel(0, -randomDelay(150, 300));
+      await page.waitForTimeout(randomDelay(800, 1500));
+      await page.mouse.wheel(0, randomDelay(150, 300));
+      await page.waitForTimeout(randomDelay(400, 800));
+      await submitButton.scrollIntoViewIfNeeded();
     }
 
-    // Hover hesitation before final click (humans hover before committing)
-    await moveMouseHumanLike(page, submitButton, randomDelay(-15, 15), randomDelay(-10, 10));
-    await page.waitForTimeout(randomDelay(2000, 4000));
+    // Hover hesitation directly over submit button
+    await moveMouseHumanLike(page, submitButton);
+    await page.waitForTimeout(randomDelay(1200, 2200));
+
+    // Ensure cursor is placed safely inside the button interior
+    const buttonBox = await submitButton.boundingBox().catch(() => null);
+    if (buttonBox) {
+      const targetX = buttonBox.x + buttonBox.width * (0.42 + Math.random() * 0.16);
+      const targetY = buttonBox.y + buttonBox.height * (0.42 + Math.random() * 0.16);
+      await page.mouse.move(targetX, targetY);
+      await page.waitForTimeout(randomDelay(120, 260));
+    }
 
     console.log('Review pause completed. Clicking Submit application now.');
     await page.mouse.down(); // real press at the hovered point (no cursor teleport)
-    await new Promise((r) => setTimeout(r, randomDelay(50, 130)));
+    await new Promise((r) => setTimeout(r, randomDelay(55, 125)));
     await page.mouse.up();
     console.log('Submit application clicked. Waiting for success or missing-field acknowledgement.');
     const submissionOutcome = await waitForSubmissionOutcome(page);
 
     if (submissionOutcome.status === 'success') {
       const successPath = await captureStageScreenshot(page, 'application-success', '', applicantId, jobUrl);
+      if (storageStatePath) {
+        await context.storageState({ path: storageStatePath }).catch(() => {});
+      }
       saveJobStatus(applicantId, jobUrl, 'success', { applicationStatus: 'success', screenshot: successPath, preSubmitScreenshot: preSubmitPath, bannerText: submissionOutcome.bannerText, profile: applicantProfile });
       console.log('Application submitted successfully and acknowledgement captured.');
     } else if (submissionOutcome.status === 'spam-blocked') {
@@ -909,6 +1114,13 @@ async function fillAshbyForm(jobUrl, resumePath) {
     console.error(`Automation failed: ${error.message}`);
     throw error;
   } finally {
+    if (storageStatePath) {
+      try {
+        await context.storageState({ path: storageStatePath });
+        const sharedPath = path.join(process.cwd(), 'shared-browser-state.json');
+        await context.storageState({ path: sharedPath });
+      } catch {}
+    }
     await browser.close();
   }
 }
@@ -925,10 +1137,20 @@ async function scanApplicationForm(jobUrl) {
   // dashboard's scan worker grind through links in the background without
   // stealing the operator's screen. Set SCAN_HEADLESS=false to watch it.
   const headless = process.env.SCAN_HEADLESS !== 'false';
+  const sharedPath = path.join(process.cwd(), 'shared-browser-state.json');
+  const scanStoragePath = ensureStorageState(sharedPath);
+
   const browser = await chromium.launch({
     headless,
     executablePath: process.env.CHROME_PATH || undefined,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', ...(headless ? [] : ['--start-maximized'])]
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-infobars',
+      ...(headless ? [] : ['--start-maximized'])
+    ]
   });
   const context = await browser.newContext({
     // viewport:null fills a real maximised window; headless has no window, so
@@ -938,6 +1160,7 @@ async function scanApplicationForm(jobUrl) {
     // its client hints + platform) and pin locale/timezone to this host.
     locale: hostLocale(),
     timezoneId: hostTimezone(),
+    storageState: scanStoragePath || undefined,
     // FIX #3: Extra HTTP headers for consistency with apply path
     extraHTTPHeaders: {
       'Accept-Language': `${hostLocale()},en-US;q=0.9,en;q=0.8`
@@ -999,6 +1222,10 @@ async function scanApplicationForm(jobUrl) {
     console.log(`[SCAN] Captured ${fields.length} field(s)${posting.h1 || posting.jobTitle ? ` for "${posting.jobTitle || posting.h1}"` : ''} -> ${out}`);
     return fields;
   } finally {
+    try {
+      const sharedPath = path.join(process.cwd(), 'shared-browser-state.json');
+      await context.storageState({ path: sharedPath });
+    } catch {}
     await browser.close();
   }
 }
