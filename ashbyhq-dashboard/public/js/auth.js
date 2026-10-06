@@ -40,7 +40,7 @@ function setMode(next) {
   $('tab-up').setAttribute('aria-selected', String(signup));
   $('signup-fields').classList.toggle('hidden', !signup);
   $('mode-hint').textContent = MODE_HINT[mode];
-  $('btn-send-code').textContent = signup ? 'Create account & send code →' : 'Send one-time code →';
+  $('btn-send-code').textContent = signup ? 'Create account & sign in →' : 'Sign in →';
   showMsg($('identity-msg'), '');
 }
 
@@ -87,14 +87,16 @@ $('btn-send-code').addEventListener('click', async () => {
       if (body.role === 'ca' && $('ops').value) body.managerId = $('ops').value;
     }
     const out = await api('/api/auth/request-code', { method: 'POST', body: JSON.stringify(body) });
-    $('sent-to').textContent = out.email;
-    $('new-account-note').textContent = out.isNewAccount
-      ? `Account created as ${String(out.role).toUpperCase()} (name: ${out.name || 'from your email'}).`
-      : `Signed in as ${String(out.role).toUpperCase()}.`;
-    $('new-account-note').textContent += ' Check the server console for the code.';
-    $('step-identity').classList.add('hidden');
-    $('step-code').classList.remove('hidden');
-    $('code').focus();
+    // PASSWORDLESS: the server mints the session on this one call, so the user
+    // goes straight to their dashboard — there is no code to send and none to enter.
+    if (out.authenticated && out.token) {
+      localStorage.setItem('awl_token', out.token);
+      location.href = '/dashboard.html';
+      return;
+    }
+    // Anything else is a broken/incomplete response: surface it rather than
+    // silently doing nothing. There is intentionally no code step to fall back to.
+    showMsg($('identity-msg'), 'Sign-in did not complete. Please try again.');
   } catch (err) {
     // Two failures are "you meant the other tab": move the panel there, then put
     // the server's explanation back (setMode clears the message box).
@@ -105,29 +107,3 @@ $('btn-send-code').addEventListener('click', async () => {
     $('btn-send-code').disabled = false;
   }
 });
-
-$('btn-back').addEventListener('click', () => {
-  $('step-code').classList.add('hidden');
-  $('step-identity').classList.remove('hidden');
-  showMsg($('code-msg'), '');
-});
-
-$('btn-verify').addEventListener('click', verify);
-$('code').addEventListener('keydown', (e) => { if (e.key === 'Enter') verify(); });
-
-async function verify() {
-  const code = $('code').value.trim();
-  if (code.length !== 6) return showMsg($('code-msg'), 'Enter the full 6-digit code.');
-  $('btn-verify').disabled = true;
-  try {
-    const out = await api('/api/auth/verify-code', {
-      method: 'POST',
-      body: JSON.stringify({ email: $('email').value.trim(), code })
-    });
-    localStorage.setItem('awl_token', out.token);
-    location.href = '/dashboard.html';
-  } catch (err) {
-    showMsg($('code-msg'), err.message);
-    $('btn-verify').disabled = false;
-  }
-}

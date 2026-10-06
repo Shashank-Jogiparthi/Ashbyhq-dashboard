@@ -1011,6 +1011,22 @@ async function verifySignupRoles() {
   check('ADMIN changes live only behind the admin-promotion endpoint, never sign-up',
     /\/api\/admin\/staff\/:uuid\/role/.test(serverSrc) && !/createStaff\(\{[^}]*role: 'admin'/.test(serverSrc));
 
+  // --- PASSWORDLESS sign-in: the one-time code is gone end to end.
+  const authSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'auth.js'), 'utf8');
+  check('request-code mints the session directly and returns a token (no code step)',
+    /const session = await createSession\(user\.uuid\)/.test(serverSrc) &&
+    /authenticated: true/.test(serverSrc) && /token: session\.token/.test(serverSrc));
+  check('request-code issues and mails no one-time code at all',
+    !/await issueOtp\(/.test(serverSrc) && !/await sendAuthCode\(/.test(serverSrc));
+  check('the sign-in panel stores the token and opens the dashboard straight away',
+    /out\.authenticated && out\.token/.test(authSrc) &&
+    /localStorage\.setItem\('awl_token', out\.token\)/.test(authSrc) &&
+    /location\.href = '\/dashboard\.html'/.test(authSrc));
+  check('the portal markup no longer contains a code entry step',
+    !/id="step-code"/.test(html) && !/6-digit authenticator code/.test(html) && !/Send one-time code/.test(html));
+  check('neither the markup nor the script still asks for a one-time code',
+    !/Send one-time code/.test(authSrc) && !/verify-code/.test(authSrc));
+
   // Runtime proof on the exported gate itself. PORT is overridden BEFORE the
   // import so this never collides with a dev server already on 3000.
   process.env.PORT = '53199';

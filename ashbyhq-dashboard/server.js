@@ -236,13 +236,15 @@ function handleError(res, error) {
 
 /* ----------------------------- auth ------------------------------- */
 
-// Step 1: sign-up / sign-in request -> issues the one-time code.
+// Sign-in / sign-up entry point. PASSWORDLESS in this build: it resolves (or
+// creates) the account, then mints the session token directly and returns it —
+// no one-time code is issued or mailed, and the portal logs straight in.
 // The portal sends an explicit `mode`: SIGN IN never creates an account and
 // SIGN UP never logs into an existing one. Defaulting to 'signup' keeps older
 // callers (and the CLI helpers) working unchanged.
-// NOTE: role is still self-selected on sign-up and both branches answer with
-// { isNewAccount, role }, so this endpoint is an enumeration oracle. Real SMTP
-// must not go live until registration is gated (invite-only / admin-approved).
+// NOTE: role is still self-selected on sign-up and this endpoint answers with
+// { isNewAccount, role }, so it remains an enumeration oracle. Gating
+// (invite-only / admin-approved) is still required before this is hardened.
 app.post('/api/auth/request-code', wrap(async (req) => {
   const email = await normalizeEmail(req.body.email);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, 'Enter a valid email address');
@@ -282,18 +284,31 @@ app.post('/api/auth/request-code', wrap(async (req) => {
     user = await getStaff(user.uuid);
   }
 
-  const code = await issueOtp(user.email);
-  await sendAuthCode(user.email, code);
+  // PASSWORDLESS (temporary): no one-time code is issued or mailed any more.
+  // Clearing the email / sign-up gate above is enough, so we mint the session
+  // right here and hand the token back — the portal drops the user straight onto
+  // their dashboard, with no code entry and no server-console/terminal round-trip.
+  const session = await createSession(user.uuid);
   await touchSignIn(user.uuid);
   await logLogin(user, isNewAccount ? 'signup' : 'signin');
-  return { sent: true, isNewAccount, email: user.email, name: user.name, role: user.role };
+  return {
+    authenticated: true,
+    token: session.token,
+    isNewAccount,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    user: { uuid: user.uuid, email: user.email, name: user.name, role: user.role }
+  };
 }));
 
 async function logLogin(user, kind) {
   await logEvent(null, kind, user.uuid, { email: user.email, role: user.role });
 }
 
-// Step 2: verify the code -> session token.
+// LEGACY / unused by the portal now that sign-in is passwordless: kept only so
+// any older caller still hits the dead-fixture guard. No code is issued, so a
+// real verify here can only fail. Do not wire the UI back to this endpoint.
 app.post('/api/auth/verify-code', wrap(async (req) => {
   const email = await normalizeEmail(req.body.email);
   if (isForbiddenLoginEmail(email)) throw new HttpError(400, 'Invalid mail: this address is retired and can no longer sign in or sign up.');
