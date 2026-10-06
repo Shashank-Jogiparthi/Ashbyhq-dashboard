@@ -1151,7 +1151,7 @@ re-point keeps SUCCESS history; the OM/DEV CA drill-down renders those run
 screenshots with a client click-through; and /api/team/ca guards an OPS to
 their own manager_id. Applicant limits are enforced per-CA (their own OM
 sets each CA's cap, default 25) and the manager may only raise a limit for a
-CA under them. 345 checks pass.
+CA under them. 358 checks pass.
 
 RESTRICTIONS the gate is per-host and per-mode, re-measured, not a
      config switch: HOST_OPT_OUT (WORKER_ENABLED=false) stays as an
@@ -1242,7 +1242,7 @@ the model, which is currently out of credit.
 
 verify:flow (step 3d) asserts it: a plain "Phone Number" box resolves from the
 CRM phone with no GenAI, the common spellings all resolve, and an unrelated
-"…Number" / location box abstains. 345 checks pass.
+"…Number" / location box abstains. 358 checks pass.
 
 ====================================================================
 15. v3.6b - WHY A RUN GETS FLAGGED, AND NEVER ASK THE CA TWICE
@@ -1286,7 +1286,7 @@ THREE RULE FIXES landed here (all asserted in verify:flow, none a setting):
 
 verify:flow (step 3d) asserts the URL guard, the model-free resume extraction
 (phone / email / link, and abstention on a narrative question), and that the
-watchdog kills + frees the slot. 345 checks pass.
+watchdog kills + frees the slot. 358 checks pass.
 
 ====================================================================
 16. v3.6c - A CLOSED POSTING IS PROVEN, NOT RETRIED
@@ -1372,7 +1372,7 @@ One consequence the operator accepted: the whitelist also removes the old
 @applywizz.local DEV/admin-style logins. The two real ADMINs (@applywizz.ai)
 always remain, and DEV sign-up stays open, so access is never globally lost -
 but a re-created login should use an @applywizz.com/.ai address to survive the
-next cleanup. 345 checks pass.
+next cleanup. 358 checks pass.
 
 ====================================================================
 18. v3.6e - SIGN-UP MINTS ONLY CA / OM / DEV, NEVER ADMIN
@@ -1406,7 +1406,7 @@ RULE (not a setting), asserted in verify:flow step 8:
     requireRole('admin') - verify asserts no createStaff(...role:'admin') path
     exists outside sign-up.
 
-345 checks pass.
+358 checks pass.
 
 ====================================================================
 19. v3.6f - THE @applywizz.local DOMAIN IS DEAD, EVERYWHERE
@@ -1443,7 +1443,7 @@ rows they owned (12 references - ca_id on rakesh, manager_id on priya.cam, the
 same submissions) survive with only the phantom owner set NULL, 0 applicants
 moved (they were re-pointed in v3.6d), 64 real @applywizz staff and the 2 real
 admins untouched. Nothing recreates them: seedStaffDirectory only upserts roster
-rows, never the fixtures. 345 checks pass.
+rows, never the fixtures. 358 checks pass.
 
 ====================================================================
 20. v3.7 - CA WORK-HISTORY + ca_data (DYNAMIC EXTERNAL APIs, VISIBILITY-ONLY)
@@ -1569,7 +1569,7 @@ RULE, asserted in verify:flow step 12: the success matcher no longer carries the
 standalone "success" token (only real confirmation phrases), and success is
 declared only once the form's own submit control has disappeared (the structural
 proof the click reached the confirmation) - so the acknowledgement screenshot is
-the post-submit page, never a second pre-submit form. 345 checks pass.
+the post-submit page, never a second pre-submit form. 358 checks pass.
 
 ====================================================================
 22. v3.7b - BLENDED INTO THE PAGE: FINGERPRINT HONESTY + A NAMED "SuS" BLOCK
@@ -1609,7 +1609,7 @@ RULE, asserted in verify:flow step 13 (source inspection, no live run): the engi
 has no DEFAULT_* job/resume constants and no hardcoded userAgent; locale+timezone
 come from the host; humanTypeValue uses a real click (no focus()/trial tell); the
 engine names 'spam-blocked' and files it FAILED 'SuS'; and the worker maps the
-spam block to a terminal FAILED 'SuS'. 345 checks pass.
+spam block to a terminal FAILED 'SuS'. 358 checks pass.
 
 23. v3.7c - WORK-HISTORY DRIVES THE CA ASSIGNMENT (NOT THE AWL'S API KEY)
 
@@ -1658,7 +1658,7 @@ the LATEST CA, a same-day handover resolves by the later end_time (not iteration
 order), refreshWorkHistory reports how many AWLs it assigned, getApplicantsForCa
 surfaces a pending job link (pending_links >= 1) while job_count stays 0, and
 listPendingLinksForCa returns the provided pending link over a CA-role-scoped route.
-345 checks pass.
+358 checks pass.
 
 24. v3.7d - THE TWO-TABLE CRM JOIN IS UUID-FIRST (A RESUME IS NEVER LOST ON A BAD
       applywizz_id)
@@ -1691,7 +1691,7 @@ RULE, asserted in verify:flow step 11: a profile with a blank applywizz_id is jo
 by its uuid and its resume survives mapCombined (awlId + resumeAddress recovered - the
 AWL-4593 class closed); the stable uuid beats a mismatched applywizz_id without
 re-keying the AWL; a profile with no uuid match falls back to the applywizz_id join;
-and a profile-only row (no CRM info) still keeps its own AWL-ID. 345 checks pass.
+and a profile-only row (no CRM info) still keeps its own AWL-ID. 358 checks pass.
 
 25. v3.7e - THE RESUME IS MIRRORED INTO SUPABASE SO RAILWAY CAN FETCH IT
 
@@ -1731,7 +1731,7 @@ copy (no re-download) and a clobbered pointer is restored from cache; with no AP
 resume it falls back to the table (via 'table'); a 403 download is reported and the
 pointer left intact; and no source at all is an honest no_resume_source - plus the
 sync / sync-one / DEV route wiring and the resume_mirrors schema on both dialects.
-345 checks pass.
+358 checks pass.
 
 26. v3.7f - FIVE-STAGE FIELD RESOLUTION, COMPANY EMAIL IS THE IDENTITY, AND
       THE CA DASHBOARD OPENS IDENTITY-FIRST
@@ -1849,7 +1849,82 @@ EVERY row flat-sorted by sort_order (the form's own sequence), hides
 the toggle when the pane closes, and keeps updateApplyGate gated on
 the server's blockers count so APPLY stays locked the same way in
 both modes.
-345 checks pass.
+358 checks pass.
 
 END OF CURRENT-STATE DOC (v3.7) - previous v2 plan superseded; base
 layer workflow reference remains ASHBY_APPLICATION_WORKFLOW.txt.
+
+27. v3.7g - DEV DASHBOARD SURGICAL STRIKE + CA VIEW CLARITY + TERMINAL-STATE RULE
+
+DEV DASHBOARD SURGICAL STRIKE. The user asked for five surfaces gone, not
+  hidden behind a toggle - gone, never to render again:
+    - the "Job links (AWL-ID -> link)" card (CSV upload + paste box + the
+      ashby_joblinks assignments table) is deleted from renderDevDataSync;
+    - the "ashby_joblink_questions (link -> pre-scanned questions)" table
+      is deleted;
+    - the "links with no question inventory yet:" list inside the Pre-scan
+      worker card is deleted;
+    - the Pre-scan worker's recent-links table now renders at most the
+      last 5 scanned links (queue.recent.slice(0, 5));
+    - the "Applicants" tab is removed from the dev / admin / ops role tabs
+      (the CA's own "My Applicants" queue tab stays - it is the CA's work
+      surface); the raw AWS-S3 resume-address table is no longer exposed
+      to every operator;
+    - the "Raw Tables" tab is removed from dev + admin and its renderer
+      is unregistered.
+  The CSV / paste ingest handlers (btn-add-links, links-csv, btn-csv-ingest)
+  are deleted alongside their UI so there is no orphan wiring.
+
+CA VIEW CLARITY. Two changes the user asked for after seeing the reduced
+  identity-first pane:
+    - COMPACT mode now shows the identity rows PLUS every unanswered
+      (missing_fact / needs_input, required) field below them, so the CA
+      sees exactly what still has to be typed without first clicking
+      "View all". Already-resolved rows (deterministic / genai /
+      placeholder / N-A / stale / optional gaps) stay behind the toggle.
+    - The acknowledgement / pre-submit screenshots are hidden behind a
+      right-aligned "Show Application" button on the card head (CSS
+      margin-left:auto detaches it from the Review / View all / APPLY /
+      SKIP cluster on the left). The button only renders when there is
+      something to show. Clicking it toggles a hidden shots-${id} div
+      and swaps its own label between Show / Hide Application.
+
+CA ROUTING: A DEAD LINK NEVER REACHES THE CA. getApplications(user, opts)
+  now filters, for the ca + ops roles only:
+    - jl.link_status <> 'unavailable'  (a closed / removed posting), and
+    - NOT EXISTS a link_scan_jobs row for that URL with status = 'FAILED'
+      (a pre-scan that gave up after max attempts).
+  These are link-level terminal states, not applicant failures: the CA has
+  nothing to review, nothing to type, and no way to make the run succeed,
+  so surfacing the row only showed them a DEV-side failure banner ("this
+  was failed by DEV in pre-scan") that is not their concern. DEV/ADMIN can
+  still opt back in via includeDeadLinks (the Queue tab triage path).
+
+TERMINAL-STATE RULE: post-CA-submit runs resolve SUCCESS or FAILED. The
+  user's rule is binary: "any application SUCCESS after CA confirmation
+  should be SUCCESS and FAILED for any other cases other than the SUCCESS"
+  - nothing sits in the queue waiting for a DEV to interpret it. Three
+  worker paths changed in worker/runner.js:
+    - an unclear acknowledgement (engine reported 'unknown' /
+      'manual-review' / 'pending') now files outcome='failed' with reason
+      "FAILED (terminal): acknowledgement unclear - the run could not
+      prove the submission landed", instead of the old PENDING state;
+    - a browser host-fault (this machine cannot launch Chrome) now files
+      finishRun('failed', reason: 'FAILED (host unavailable): ...')
+      instead of handBackToQueue - the CA sees a real FAILED row and can
+      re-apply deliberately once a capable host is up;
+    - a resume-unreadable host-fault (this machine has no PGHOST) files
+      the same terminal FAILED instead of a silent hand-back.
+  The SuS spam-block was already terminal FAILED and stays so.
+
+verify:flow step 15 grows from 43 to 56 checks: the compact-mode check now
+  asserts identity + unanswered + review-gaps; a new check asserts the
+  screenshots live behind the Show Application button (not inline); the
+  host-fault check asserts finishRun('failed') replaced handBackToQueue;
+  and 10 new checks assert every DEV-dashboard removal happened (the
+  strings "Job links (AWL-ID", "btn-csv-ingest", "links-csv",
+  "ashby_joblink_questions (link", "btn-add-links", "links with no
+  question inventory yet", "{ id: 'applicants', label: 'Applicants' }",
+  "{ id: 'tables', label: 'Raw Tables' }", "tables: renderDevTables" must
+  all be ABSENT from app.js) plus the CA routing filter and the three
+  terminal-state worker paths. 358 checks pass.

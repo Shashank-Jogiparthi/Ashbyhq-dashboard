@@ -391,6 +391,12 @@ a:hover { color: #d97a18; }
 .queue-card { margin-bottom: 14px; border-left: 7px solid var(--sky); }
 .queue-card .head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
 .queue-card .actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+/* "Show Application" sits on the right of the card head, detached from the
+   Review / View all / APPLY / SKIP cluster on the left. */
+.queue-card .head .show-app-btn { margin-left: auto; }
+/* Compact review mode's "Needs your input" block, shown under the identity
+   block so the CA sees exactly what still has to be typed. */
+.review-gaps { border-color: #f3c6c6 !important; background: #fff7f7 !important; }
 /* Evidence screenshots (pre-submit + acknowledgement) from Supabase Storage */
 .shots { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; align-items: flex-start; }
 .shots .shot { margin: 0; width: 150px; text-align: center; }

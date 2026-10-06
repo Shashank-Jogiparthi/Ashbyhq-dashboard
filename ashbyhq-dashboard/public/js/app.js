@@ -83,23 +83,25 @@ const ROLE_TABS = {
     { id: 'assignments', label: 'Assignments' },
     { id: 'caview', label: 'CA Overview' },
     { id: 'workhistory', label: 'Work History' },
-    { id: 'applicants', label: 'Applicants' },
     { id: 'links', label: 'Job Links' },
     { id: 'applications', label: 'Applications' },
     { id: 'activity', label: 'Activity' }
   ],
+  // The Applicants tab (AWL-ID -> resume address table) is intentionally gone
+  // from every non-CA role: the CA queue is the only surface that needs to see
+  // an applicant row, and the DEV dashboard used to expose the raw AWS S3
+  // resume URL to every operator. The renderer stays registered for the CA
+  // role's own "My Applicants" view.
   dev: [
     { id: 'system', label: 'System' },
     { id: 'datasync', label: 'Data Sync' },
     { id: 'queue', label: 'Queue' },
-    { id: 'applicants', label: 'Applicants' },
     { id: 'applications', label: 'Applications' },
     { id: 'staff', label: 'Staff' },
     { id: 'people', label: 'People' },
     { id: 'workhistory', label: 'Work History' },
     { id: 'assignhealth', label: 'Assignment health' },
-    { id: 'events', label: 'Events' },
-    { id: 'tables', label: 'Raw Tables' }
+    { id: 'events', label: 'Events' }
   ],
   // ADMIN = full DEV access, plus the Staff tab gains role-change + member
   // removal controls (rendered only when ME.role === 'admin').
@@ -107,14 +109,12 @@ const ROLE_TABS = {
     { id: 'system', label: 'System' },
     { id: 'datasync', label: 'Data Sync' },
     { id: 'queue', label: 'Queue' },
-    { id: 'applicants', label: 'Applicants' },
     { id: 'applications', label: 'Applications' },
     { id: 'staff', label: 'Staff & Members' },
     { id: 'people', label: 'People' },
     { id: 'workhistory', label: 'Work History' },
     { id: 'assignhealth', label: 'Assignment health' },
-    { id: 'events', label: 'Events' },
-    { id: 'tables', label: 'Raw Tables' }
+    { id: 'events', label: 'Events' }
   ]
 };
 
@@ -133,8 +133,7 @@ const RENDERERS = {
   datasync: renderDevDataSync,
   queue: renderDevQueue,
   staff: renderDevStaff,
-  events: renderDevEvents,
-  tables: renderDevTables
+  events: renderDevEvents
 };
 
 async function boot() {
@@ -365,6 +364,21 @@ function drawQueue(awlId, applications, pendingLinks = []) {
         });
       }
     });
+
+    // "Show Application" reveals the pre-submit + acknowledgement screenshots
+    // that this run captured. It sits on the right of the card head (visually
+    // detached from the Review / View all / APPLY / SKIP cluster) so the CA's
+    // queue stays scannable and the proof is one click away when they want it.
+    const showAppBtn = $(`showapp-${a.id}`);
+    if (showAppBtn) showAppBtn.addEventListener('click', () => {
+      const shots = $(`shots-${a.id}`);
+      if (!shots) return;
+      const nowHidden = shots.classList.toggle('hidden');
+      showAppBtn.textContent = nowHidden ? '📷 Show Application' : '📷 Hide Application';
+      showAppBtn.title = nowHidden
+        ? 'Reveal the pre-submit and acknowledgement screenshots this run captured'
+        : 'Collapse the screenshots';
+    });
   });
 }
 
@@ -405,15 +419,23 @@ function unavailableProofHtml(a) {
 function queueCard(a, isCa) {
   const decided = a.status !== 'ASSIGNED';
   const reason = a.skip_reason || a.fail_reason;
+  // The acknowledgement / pre-submit screenshots are hidden behind a dedicated
+  // right-aligned "Show Application" button so the CA's queue stays scannable.
+  // The button only renders when screenshotsHtml() would actually produce
+  // content (a run that never got to the screenshot stage has nothing to show).
+  const shotsMarkup = screenshotsHtml(a);
+  const proofMarkup = unavailableProofHtml(a);
+  const hasShots = !!(shotsMarkup || proofMarkup);
   return `<div class="card queue-card">
     <div class="head">
       <b>${esc(a.company)}</b> — ${esc(a.title)} ${chip(a.status)}
       ${a.link_status !== 'valid' ? `<span class="chip FAILED">link ${esc(a.link_status)}</span>` : ''}
+      ${hasShots ? `<button class="show-app-btn" id="showapp-${a.id}" title="Reveal the pre-submit and acknowledgement screenshots this run captured">📷 Show Application</button>` : ''}
     </div>
     <div class="muted"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url)}</a></div>
     ${reason ? `<div class="muted">Reason: ${esc(reason)}</div>` : ''}
     ${a.run_id ? `<div class="muted mono">run ${esc(a.run_id)} · attempts ${a.attempts}</div>` : ''}
-    ${screenshotsHtml(a)}
+    <div id="shots-${a.id}" class="hidden">${shotsMarkup}${proofMarkup}</div>
     ${isCa && !decided ? `
       <div class="actions">
         <button id="review-toggle-${a.id}">📝 Review answers</button>
@@ -426,7 +448,6 @@ function queueCard(a, isCa) {
         <input id="reason-input-${a.id}" placeholder="Reason for skipping (required)…" />
         <button id="reason-confirm-${a.id}">Confirm skip</button>
       </div>` : ''}
-    ${unavailableProofHtml(a)}
     ${isCa && decided ? `<div class="muted">Decision by CA on ${fmt(a.decision_at)}</div>` : ''}
   </div>`;
 }
@@ -610,10 +631,25 @@ function renderReviewPane(appId, state) {
   }
 
   if (!expanded) {
-    // COMPACT (default): the four identity fields ONLY. Nothing else visible.
-    pane.innerHTML = identity.length
+    // COMPACT (default): the identity fields PLUS every unanswered question,
+    // so the CA sees exactly what still needs to be typed without having to
+    // click "View all" first. "Unanswered" = any row whose source is
+    // missing_fact or needs_input AND has no value AND is required (optional
+    // gaps stay behind the toggle so the compact view stays scannable).
+    // Anything already resolved (deterministic / genai / placeholder / N-A /
+    // stale / optional gap) is hidden until the CA clicks "View all".
+    const unanswered = everything.filter((r) => !r.value
+      && (r.source === 'missing_fact' || r.source === 'needs_input') && !r.optional);
+    const unansweredMode = (r) => r.optional ? 'optional' : 'required';
+    const identityBlock = identity.length
       ? `<div class="review-sec review-primary"><div class="review-primary-head">👤 Primary contact (${identity.length}) — name, phone, company email</div>${identity.map((r) => fieldRow(appId, r, identityMode(r))).join('')}</div>`
-      : '<div class="muted">This form has no name / phone / email question. Click "View all" to see what it does ask.</div>';
+      : '';
+    const gapsBlock = unanswered.length
+      ? `<div class="review-sec review-gaps"><div class="review-primary-head">✍ Needs your input (${unanswered.length}) — answer these to unlock APPLY</div>${unanswered.map((r) => fieldRow(appId, r, unansweredMode(r))).join('')}</div>`
+      : '';
+    pane.innerHTML = (identityBlock || gapsBlock)
+      ? `${identityBlock}${gapsBlock}${!identity.length && !unanswered.length ? '' : ''}`
+      : '<div class="muted">Nothing to review — every question is already answered. Click "View all" to inspect the full application.</div>';
   } else {
     // EXPANDED: every question in FORM ORDER (the sequence Ashby asks them).
     // Sections are gone because the CA asked for the same reading experience
@@ -1303,7 +1339,10 @@ function preScanQueueCard(queue = {}) {
     bits.push(`<p class="muted small">${queue.running.map((r) => `▶ <span class="mono">${esc(r.url)}</span> — ${r.seconds}s (job #${r.jobId})`).join('<br>')}</p>`);
   }
   if (queue.recent?.length) {
-    bits.push(tableHtml(['link', 'state', 'tries', 'fields', 'took', 'last error / why'], queue.recent.map((j) => [
+    // Only the last 5 scanned links: the DEV asked for a glanceable card, not a
+    // scrolling archive. Anything older is still in `link_scan_jobs` and can be
+    // pulled by the DEV if needed; the pane just does not render it.
+    bits.push(tableHtml(['link', 'state', 'tries', 'fields', 'took', 'last error / why'], queue.recent.slice(0, 5).map((j) => [
       `<span class="mono small">${esc(j.url)}</span>`,
       (j.status === 'DONE' ? '<b>✓ scanned</b>' : j.status === 'FAILED' ? '<span class="pill">✗ failed</span>'
         : j.status === 'RUNNING' ? '⏳ scanning' : '🕐 queued') + viaTag(j),
@@ -1313,9 +1352,6 @@ function preScanQueueCard(queue = {}) {
       `<span class="small" title="${esc(j.last_error || '')}">${esc(String(j.last_error || j.reason || '—').slice(0, 70))}</span>`
     ])));
   }
-  const blocked = queue.unscanned?.length
-    ? `<p class="muted small" style="margin-top:6px;">links with no question inventory yet: ${queue.unscanned.map((l) => `<div class="mono small">#${l.id} ${esc(l.company || '?')} — ${esc(l.url)}</div>`).join('')}</p>`
-    : '';
   return `<div class="card" style="margin-bottom:14px;">
       <b>Pre-scan worker</b>
       <p class="muted">Every newly assigned link gets its questions scanned into
@@ -1329,14 +1365,12 @@ function preScanQueueCard(queue = {}) {
         <button id="btn-scan-retry" ${c.FAILED ? '' : 'disabled'}>↻ Retry ${c.FAILED || 0} failed link(s)</button>
         <button id="btn-scan-refresh">↻ Refresh</button>
       </div>
-      ${blocked}
     </div>`;
 }
 
 async function renderDevDataSync() {
-  const [data, cache, queue] = await Promise.all([
+  const [data, queue] = await Promise.all([
     api('/api/dev/overview'),
-    api('/api/dev/joblinks').catch(() => ({ joblinks: [], configured: false, note: 'unreachable' })),
     api('/api/dev/scan-queue').catch(() => ({ counts: {}, running: [], recent: [], unscanned: [] }))
   ]);
   const opsStaff = data.staff.filter((s) => s.role === 'ops');
@@ -1359,51 +1393,11 @@ async function renderDevDataSync() {
         ${crmMissing ? '<b>Until then this host cannot read client_profiles: anything it ingests becomes a nameless placeholder and any apply fails for want of a resume.</b>' : ''}
       </p>
       <p class="muted">Then pull AWL-ID applicants into the local store. Resumes are never stored — only the S3 address.
-        Job links are read from <span class="mono">ashby_joblinks</span> on every sync; the box below is the write side.</p>
+        Job links are read from <span class="mono">ashby_joblinks</span> on every sync.</p>
       <div class="actions">
         <button class="primary" id="btn-pg-sync">⇅ Sync applicants from Postgres</button>
       </div>
       <div id="sync-out" class="muted" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="card" style="margin-bottom:14px;">
-      <b>Job links (AWL-ID → link)</b>
-      <p class="muted">Upload a <span class="mono">.csv</span> export — one row per assignment, with an
-        AWL-ID column and a job-link column. Column names are matched loosely
-        (<span class="mono">applywizz_id / awl_id / awl / id</span> and
-        <span class="mono">job_link / url / link / apply_url</span>), quoted cells, <span class="mono">.tsv</span>
-        and <span class="mono">;</span>/<span class="mono">|</span> delimiters are handled, and
-        <span class="mono">company / title</span> are used when present. Every row is appended to
-        <span class="mono">ashby_joblinks</span> in the CRM, the link is registered once in
-        <span class="mono">ashby_joblink_questions</span>, and a link with no cached questions yet is
-        <b>pre-scanned automatically</b> in the background — big files go in batches so the request never times out.</p>
-      <div class="actions" style="align-items:center;flex-wrap:wrap;gap:10px;">
-        <label class="btn green">⤒ Choose .csv
-          <input type="file" id="links-csv" accept=".csv,.tsv,.txt,text/csv,text/plain" hidden />
-        </label>
-        <span class="muted small" id="csv-name">no file chosen</span>
-        <button class="primary" id="btn-csv-ingest" disabled>⤑ Ingest file</button>
-      </div>
-      <details style="margin-top:10px;">
-        <summary class="muted small">…or paste lines (one pair per line, any spacing, # ignored)</summary>
-        <textarea id="links-paste" rows="4" style="width:100%;font-family:monospace;font-size:12px;margin-top:8px;"
-          placeholder="AWL-101  https://jobs.ashbyhq.com/acme/4e64ab86-4e30-403b-b1b9-41dc052570ce&#10;AWL-102  https://jobs.ashbyhq.com/acme/4e64ab86-4e30-403b-b1b9-41dc052570ce"></textarea>
-        <div class="actions"><button class="green" id="btn-add-links">⤑ Add job links</button></div>
-      </details>
-      <div id="links-out" class="muted" style="margin-top:8px;"></div>
-      <p class="muted" style="margin-top:10px;">ashby_joblinks (AWL-ID → links):
-        ${tableHtml(['AWL-ID', 'job_links'], (cache.assignments || []).map((r) => [
-          `<span class="mono">${esc(r.awl_id)}</span>`,
-          r.job_links.map((u) => `<div class="small mono">${esc(u)}</div>`).join('') || '<span class="muted">—</span>'
-        ])) || '<p class="muted">No assignments yet.</p>'}
-      </p>
-      <p class="muted" style="margin-top:10px;">ashby_joblink_questions (link → pre-scanned questions):
-        ${tableHtml(['job_id', 'job_link', 'questions'], (cache.joblinks || []).map((r) => [
-          `<span class="mono small">${esc(r.job_id)}</span>`,
-          `<a href="${esc(r.job_link)}" target="_blank" rel="noopener">${esc(r.job_link)}</a>`,
-          r.scanned ? `<b>${r.question_count}</b>` : '<span class="pill">not scanned</span>'
-        ])) || '<p class="muted">No links registered yet.</p>'}
-      </p>
     </div>
 
     ${preScanQueueCard(queue)}
@@ -1547,45 +1541,6 @@ async function ingestLinkText(text, status) {
   }
   return bits.join('<br>');
 }
-
-  $('btn-add-links').addEventListener('click', async () => {
-    const text = $('links-paste').value.trim();
-    if (!text) return toast('Paste at least one "AWL-ID  <job link>" line.', true);
-    $('btn-add-links').disabled = true;
-    try {
-      const summary = await ingestLinkText(text, $('links-out'));
-      // Refresh FIRST, then write: renderDevDataSync() replaces the whole pane,
-      // so a summary put up before it would be wiped along with the paste box.
-      await renderDevDataSync();
-      $('links-out').innerHTML = summary;
-      toast('Job links saved.');
-    } catch (err) { const el = $('links-out'); if (el) el.textContent = ''; toast(err.message, true); }
-    const btn = $('btn-add-links');
-    if (btn) btn.disabled = false;
-  });
-
-  // Choosing a file only names it; writing to the CRM needs the second click, so
-  // a misclick on the wrong export cannot push assignments anywhere.
-  $('links-csv').addEventListener('change', () => {
-    const file = $('links-csv').files?.[0];
-    $('csv-name').textContent = file ? `${file.name} · ${(file.size / 1024).toFixed(1)} KB` : 'no file chosen';
-    $('btn-csv-ingest').disabled = !file;
-    $('links-out').textContent = '';
-  });
-
-  $('btn-csv-ingest').addEventListener('click', async () => {
-    const file = $('links-csv').files?.[0];
-    if (!file) return toast('Choose a .csv first.', true);
-    $('btn-csv-ingest').disabled = true;
-    try {
-      const summary = await ingestLinkText(await file.text(), $('links-out'));
-      await renderDevDataSync();          // re-render before the summary survives
-      $('links-out').innerHTML = summary;
-      toast(`${file.name} ingested.`);
-    } catch (err) { const el = $('links-out'); if (el) el.textContent = ''; toast(err.message, true); }
-    const btn = $('btn-csv-ingest');
-    if (btn) btn.disabled = false;
-  });
 
   $('btn-ingest').addEventListener('click', async () => {
     let doc;

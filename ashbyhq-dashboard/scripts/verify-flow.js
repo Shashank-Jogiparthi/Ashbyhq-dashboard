@@ -476,9 +476,11 @@ async function verifyCapabilityGate() {
     && !JSON.stringify(describeConnectorEnv({ PGHOST: 'secret-host' })).includes('hunter2'));
   check('a run states which machine took it and what that machine could read',
     /run_started[\s\S]{0,220}host: browserState\('apply'\)\.host[\s\S]{0,120}crm_connector: snapshot\.configured/.test(runnerSrc));
-  check('the worker asks that classifier instead of blaming the applicant, and erases the run dir it left',
-    /classifyMissingResume\(\{/.test(runnerSrc) && /run_deferred_no_crm/.test(runnerSrc)
-      && /cleanupRun\(runDir\);\s*\n\s*return;/.test(runnerSrc));
+  check('the worker asks that classifier and files a host fault as a TERMINAL FAILED (no hand-back to queue)',
+    /classifyMissingResume\(\{/.test(runnerSrc) && /run_failed_no_crm/.test(runnerSrc)
+      && /finishRun\(app\.id, 'failed', \{ reason: `FAILED \(resume unreadable on this host\)/.test(runnerSrc)
+      && /cleanupRun\(runDir\);\s*\n\s*return;/.test(runnerSrc)
+      && !/handBackToQueue\(app\.id, verdict\.reason/.test(runnerSrc));
   check('an ingest records whether its own host could read the CRM at all',
     /connector_configured: connectorConfigured\(\)/.test(fs.readFileSync(SERVER_SCRIPT, 'utf8')));
 
@@ -532,9 +534,12 @@ async function verifyCapabilityGate() {
     /scanState: linkUnavailable \? 'unavailable'/.test(fs.readFileSync(SERVER_SCRIPT, 'utf8'))
       && /state === 'unavailable'/.test(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'app.js'), 'utf8')));
   const appSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'app.js'), 'utf8');
-  check('the proof is a small thumbnail on the card (below the actions), not a big image in the Review pane',
-    /function unavailableProofHtml/.test(appSrc) && /\$\{unavailableProofHtml\(a\)\}/.test(appSrc)
-      && /class="shot"/.test(appSrc.slice(appSrc.indexOf('function unavailableProofHtml'), appSrc.indexOf('function queueCard')))
+  check('the proof is hidden behind a right-aligned "Show Application" button, not rendered inline on the card',
+    /function unavailableProofHtml/.test(appSrc)
+      && /id="shots-\$\{a\.id\}" class="hidden"/.test(appSrc)
+      && /id="showapp-\$\{a\.id\}"/.test(appSrc)
+      && /📷 Show Application/.test(appSrc)
+      && /class="show-app-btn"/.test(appSrc)
       && !/evidenceHtml/.test(appSrc));
 
   const deadUrl = 'https://jobs.ashbyhq.com/verify/deaddead-dead-4ead-bead-deaddeaddead';
@@ -1684,10 +1689,13 @@ async function verifyFiveStageAndIdentityFirst() {
   check('clicking "View all" flips state.expanded and re-renders the SAME pane (no refetch)',
     /st\.expanded = !st\.expanded/.test(appSrc) &&
     /renderReviewPane\(a\.id, st\)/.test(appSrc));
-  check('compact (default) mode renders ONLY identity rows - nothing else visible',
+  check('compact (default) mode renders identity rows PLUS every unanswered field, nothing already-resolved',
     /const expanded = state\.expanded === true/.test(rvp) &&
-    /if \(!expanded\)[\s\S]{0,600}identity\.map\(\(r\) => fieldRow\(appId, r, identityMode\(r\)\)\)/.test(rvp) &&
-    /review-sec review-primary/.test(rvp));
+    /if \(!expanded\)[\s\S]{0,1400}identity\.map\(\(r\) => fieldRow\(appId, r, identityMode\(r\)\)\)/.test(rvp) &&
+    /review-sec review-primary/.test(rvp) &&
+    /const unanswered = everything\.filter\(\(r\) => !r\.value/.test(rvp) &&
+    /review-sec review-gaps/.test(rvp) &&
+    /unanswered\.map\(\(r\) => fieldRow\(appId, r, unansweredMode\(r\)\)\)/.test(rvp));
   check('expanded mode lists EVERY question in the FORM\'S OWN SEQUENCE (sorted by sort_order)',
     /\.sort\(\(a, b\) => \(a\.sort_order \?\? 0\) - \(b\.sort_order \?\? 0\)\)/.test(rvp) &&
     /everything\.map\(\(r\) => fieldRow\(appId, r, expandedMode\(r\)\)\)/.test(rvp));
@@ -1701,6 +1709,48 @@ async function verifyFiveStageAndIdentityFirst() {
     /updateApplyGate\(a\.id, state\.blockers, true\)/.test(appSrc));
   check('a required identity row the draft pass could not fill still renders with the "required" mode',
     /const identityMode = \(r\) => \(r\.source === 'missing_fact'/.test(appSrc));
+
+  // --- DEV dashboard removals (the user asked for these surfaces gone, not
+  //     hidden behind a toggle: they must never render again).
+  check('DEV Data Sync no longer renders the "Job links (AWL-ID → link)" card at all',
+    !/Job links \(AWL-ID/.test(appSrc) && !/btn-csv-ingest/.test(appSrc) && !/links-csv/.test(appSrc));
+  check('DEV Data Sync no longer renders the "ashby_joblink_questions" table',
+    !/ashby_joblink_questions \(link/.test(appSrc) && !/btn-add-links/.test(appSrc));
+  check('the Pre-scan worker card no longer lists "links with no question inventory yet"',
+    !/links with no question inventory yet/.test(appSrc));
+  check('the Pre-scan worker card caps its recent-links table at the last 5',
+    /queue\.recent\.slice\(0, 5\)/.test(appSrc));
+  check('the "Applicants" tab is gone from every non-CA role (dev / admin / ops)',
+    !/\{ id: 'applicants', label: 'Applicants' \}/.test(appSrc));
+  check('the CA role keeps its own "My Applicants" queue tab',
+    /\{ id: 'applicants', label: 'My Applicants' \}/.test(appSrc));
+  check('the "Raw Tables" tab is removed from dev + admin and its renderer unregistered',
+    !/\{ id: 'tables', label: 'Raw Tables' \}/.test(appSrc) && !/tables:\s*renderDevTables/.test(appSrc));
+
+  // --- CA routing: a dead link never reaches the CA dashboard.
+  const storeSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'db', 'store.js'), 'utf8');
+  check('getApplications hides unavailable links from CA/OPS (the DEV-side failure is not their concern)',
+    /user\.role === 'ca' \|\| user\.role === 'ops'/.test(storeSrc) &&
+    /jl\.link_status <> 'unavailable'/.test(storeSrc));
+  check('getApplications hides links whose pre-scan FAILED from CA/OPS (no "failed by DEV in pre-scan" banner)',
+    /lsj\.status = 'FAILED'/.test(storeSrc) &&
+    /NOT EXISTS \([\s\S]{0,120}link_scan_jobs lsj/.test(storeSrc));
+  check('DEV/ADMIN can still opt back in via includeDeadLinks (the Queue tab triage path)',
+    /includeDeadLinks = false/.test(storeSrc) &&
+    /if \(!includeDeadLinks && \(user\.role === 'ca' \|\| user\.role === 'ops'\)\)/.test(storeSrc));
+
+  // --- Terminal-state rule: post-CA-submit runs resolve SUCCESS or FAILED.
+  const runnerSrc2 = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'runner.js'), 'utf8');
+  check('TERMINAL RULE: an unclear acknowledgement files FAILED, never PENDING',
+    /outcome = 'failed'/.test(runnerSrc2) &&
+    /FAILED \(terminal\): acknowledgement unclear/.test(runnerSrc2) &&
+    !/outcome = 'pending'/.test(runnerSrc2));
+  check('TERMINAL RULE: a browser host-fault files FAILED, no handBackToQueue after CA clicked APPLY',
+    /FAILED \(host unavailable\)/.test(runnerSrc2) &&
+    !/handBackToQueue\(app\.id, detail/.test(runnerSrc2));
+  check('TERMINAL RULE: a resume-unreadable host-fault files FAILED, no handBackToQueue',
+    /FAILED \(resume unreadable on this host\)/.test(runnerSrc2) &&
+    !/handBackToQueue\(app\.id, verdict\.reason/.test(runnerSrc2));
 }
 
 async function verifyCrmFetch() {

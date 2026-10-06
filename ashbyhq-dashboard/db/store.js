@@ -385,13 +385,27 @@ function scopeParams(user) {
   return [];
 }
 
-export async function getApplications(user, { status = null, awlId = null } = {}) {
+export async function getApplications(user, { status = null, awlId = null, includeDeadLinks = false } = {}) {
   const parts = [];
   const params = [];
   const scope = scopeCondition(user);
   if (scope) { parts.push(scope); params.push(...scopeParams(user)); }
   if (status) { parts.push('a.status = ?'); params.push(status); }
   if (awlId) { parts.push('a.awl_id = ?'); params.push(awlId); }
+  // A CA must NEVER see a job link whose posting is closed / removed or whose
+  // pre-scan gave up after max attempts. Those are link-level terminal states,
+  // not applicant-level failures: the CA has nothing to review, nothing to
+  // type, and no way to make the run succeed, so surfacing the row only shows
+  // them a DEV-side failure banner ("this was failed by DEV in pre-scan") that
+  // is not their concern. DEV/ADMIN can still see them via includeDeadLinks
+  // (the Queue tab uses that flag to triage links that need a manual retry).
+  if (!includeDeadLinks && (user.role === 'ca' || user.role === 'ops')) {
+    parts.push("jl.link_status <> 'unavailable'");
+    parts.push(`NOT EXISTS (
+      SELECT 1 FROM link_scan_jobs lsj
+       WHERE lsj.url = jl.url AND lsj.status = 'FAILED'
+    )`);
+  }
   const where = parts.length ? `WHERE ${parts.join(' AND ')}` : '';
   return db.prepare(`${APP_SELECT} ${where} ORDER BY a.created_at DESC`).all(...params);
 }

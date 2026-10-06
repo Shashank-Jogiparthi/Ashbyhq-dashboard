@@ -278,8 +278,16 @@ async function launch(app) {
       }
       else if (status === 'failed') { outcome = 'failed'; reason = result.bannerText || result.reason || 'Validation error'; }
       else if (status === 'unknown' || status === 'manual-review' || status === 'pending') {
-        outcome = 'pending';
-        reason = status === 'manual-review' ? 'No submit button (manual review)' : 'Outcome unclear';
+        // TERMINAL-STATE RULE: once the CA has clicked APPLY, every outcome
+        // must be SUCCESS or FAILED — never a PENDING row that sits in the
+        // queue waiting for a DEV to interpret it. An unclear acknowledgement
+        // is a failure by definition (we cannot prove it went through), so it
+        // files as FAILED with the reason the engine gave. The CA can re-apply
+        // from their own dashboard if they believe the submission landed.
+        outcome = 'failed';
+        reason = status === 'manual-review'
+          ? 'FAILED (terminal): no submit button on the form (manual review required)'
+          : 'FAILED (terminal): acknowledgement unclear — the run could not prove the submission landed';
         // Backstop: an older engine that stored the spam banner as 'unknown'.
         const banner = readUnknownBanner(result.bannerText);
         if (banner) { flagged = banner.kind; reason = banner.reason; }
@@ -306,11 +314,15 @@ async function launch(app) {
     if (fault.hostFault) {
       const detail = fault.reason || 'browser unavailable';
       try {
-        await handBackToQueue(app.id, detail.slice(0, 300));
-        await logEvent(app.id, 'run_deferred_host_fault', 'worker', { run_id: runId, host: browserState('apply').host, error: detail.slice(0, 300), exit_code: childExit.code, exit_signal: childExit.signal, concurrent: active.size + 1, capacity: MAX_CONCURRENT });
-        console.log(`[run ${app.id}] host fault on ${browserState('apply').host} - application handed back to the queue: ${detail.slice(0, 160)}`);
+        // TERMINAL-STATE RULE: a host fault after the CA clicked APPLY files
+        // the run as FAILED, not a silent hand-back to the queue. The CA (or a
+        // DEV) sees a real FAILED row with the host's reason and can re-apply
+        // deliberately; nothing sits in QUEUED waiting for a capable machine.
+        await finishRun(app.id, 'failed', { reason: `FAILED (host unavailable): ${detail.slice(0, 260)}` });
+        await logEvent(app.id, 'run_failed_host_fault', 'worker', { run_id: runId, host: browserState('apply').host, error: detail.slice(0, 300), exit_code: childExit.code, exit_signal: childExit.signal, concurrent: active.size + 1, capacity: MAX_CONCURRENT });
+        console.log(`[run ${app.id}] host fault on ${browserState('apply').host} - application filed FAILED (terminal): ${detail.slice(0, 160)}`);
       } catch (err) {
-        try { await markRunCrash(app.id, `Hand-back failed: ${err.message}`); } catch { /* ignore */ }
+        try { await markRunCrash(app.id, `Terminal FAILED write failed: ${err.message}`); } catch { /* ignore */ }
       }
       checkBrowser({ force: true, mode: 'apply' }).catch(() => {});
       cleanupRun(runDir);
@@ -374,9 +386,12 @@ async function launch(app) {
         : { hostFault: false, reason: `Resume unavailable: ${err.message}` };
       try {
         if (verdict.hostFault) {
-          await handBackToQueue(app.id, verdict.reason.slice(0, 300));
-          await logEvent(app.id, 'run_deferred_no_crm', 'worker', { run_id: runId, host: browserState('apply').host, error: verdict.reason.slice(0, 300) });
-          console.log(`[run ${app.id}] this host cannot supply the resume - application handed back to the queue: ${verdict.reason.slice(0, 160)}`);
+          // TERMINAL-STATE RULE: same as the browser host-fault above — a
+          // resume that this host cannot read files the run FAILED rather
+          // than parking it back in QUEUED for a DEV to notice.
+          await finishRun(app.id, 'failed', { reason: `FAILED (resume unreadable on this host): ${verdict.reason.slice(0, 260)}` });
+          await logEvent(app.id, 'run_failed_no_crm', 'worker', { run_id: runId, host: browserState('apply').host, error: verdict.reason.slice(0, 300) });
+          console.log(`[run ${app.id}] this host cannot supply the resume - application filed FAILED (terminal): ${verdict.reason.slice(0, 160)}`);
         } else {
           await markRunCrash(app.id, verdict.reason.slice(0, 300));
         }
