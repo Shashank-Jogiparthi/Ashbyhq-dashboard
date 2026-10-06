@@ -802,8 +802,8 @@ async function renderOpsOverview() {
     ca.active ? 'ACTIVE' : 'INACTIVE',
     ca.applications,
     `<div style="display:flex;gap:6px;align-items:center;">
-       <span class="muted small" data-ca-used="${ca.uuid}">${ca.assignedApplicants}/${ca.applicantQuota ?? 25}</span>
-       <input type="number" min="0" value="${ca.applicantQuota ?? 25}" data-ca-quota="${ca.uuid}" style="width:70px;" />
+       <span class="muted small" data-ca-used="${ca.uuid}">${ca.assignedApplicants}/${(ca.applicantQuota ?? 25) < 0 ? 'No limit' : (ca.applicantQuota ?? 25)}</span>
+       <input type="number" min="0" value="${(ca.applicantQuota ?? 25) < 0 ? '' : (ca.applicantQuota ?? 25)}" placeholder="No limit" data-ca-quota="${ca.uuid}" style="width:70px;" />
        <button class="primary" data-ca-quota-save="${ca.uuid}">Set</button>
      </div>`,
     fmt(ca.lastSignIn)
@@ -834,7 +834,8 @@ async function renderOpsOverview() {
 
 async function renderOpsAssignments() {
   const { applicants, cas } = await api('/api/ops/pool');
-  const atLimit = (c) => (c.assigned ?? 0) >= (c.applicant_quota ?? 25);
+  const unlimitedCa = (c) => (c.applicant_quota ?? 25) < 0;
+  const atLimit = (c) => !unlimitedCa(c) && (c.assigned ?? 0) >= (c.applicant_quota ?? 25);
   $('view').innerHTML = `
     <div class="stat-grid" style="margin-bottom:14px;">
       <div class="stat yellow"><div class="label">Unassigned in pool</div><div class="value">${applicants.length}</div></div>
@@ -850,7 +851,7 @@ async function renderOpsAssignments() {
           a.pending_links,
           cas.length
             ? `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                 <select data-assign-ca="${esc(a.awl_id)}">${cas.map((c) => `<option value="${c.uuid}" ${atLimit(c) ? 'disabled' : ''}>${esc(c.name)} (${c.assigned ?? 0}/${c.applicant_quota ?? 25})${atLimit(c) ? ' — full' : ''}</option>`).join('')}</select>
+                 <select data-assign-ca="${esc(a.awl_id)}">${cas.map((c) => `<option value="${c.uuid}" ${atLimit(c) ? 'disabled' : ''}>${esc(c.name)} (${c.assigned ?? 0}/${unlimitedCa(c) ? '∞' : (c.applicant_quota ?? 25)})${atLimit(c) ? ' — full' : ''}</option>`).join('')}</select>
                  <button class="primary" data-assign="${esc(a.awl_id)}">Assign</button>
                </div>`
             : '<span class="muted">no CAs</span>'
@@ -1375,7 +1376,14 @@ async function renderDevDataSync() {
   ]);
   const opsStaff = data.staff.filter((s) => s.role === 'ops');
   const caStaff = data.staff.filter((s) => s.role === 'ca');
-  const staffName = new Map(data.staff.map((s) => [s.uuid, s.name]));
+  // The single shared CA quota (the DEV block edits one value for every CA).
+  // Authoritative from the server; fall back to deriving from the CA rows so an
+  // older overview still renders sensibly.
+  const globalCa = data.caQuota || {
+    unlimited: caStaff.length === 0 || caStaff.every((c) => (c.applicantQuota ?? 25) < 0),
+    quota: caStaff.length && caStaff.every((c) => (c.applicantQuota ?? 25) >= 0)
+      ? caStaff[0].applicantQuota : null
+  };
   const ws = data.system.worker || {};
   // A CRM connector belongs to the machine that runs the code, not to the shared
   // database, so this card has to say which host is answering and which of the
@@ -1418,15 +1426,19 @@ async function renderDevDataSync() {
     </div>
 
     <div class="card" style="margin-bottom:14px;">
-      <b>Per-CA applicant quota</b>
-      <p class="muted">How many applicants each Career Associate may hold (default 25). OMs set this for their own CAs from the Overview tab; DEV/ADMIN can set any here. New assignments are capped at the CA's own limit — managers are no longer capped.</p>
-      ${tableHtml(['CA', 'Email', 'Under OM', 'Quota'], caStaff.map((c) => [
-        esc(c.name), `<span class="mono">${esc(c.email)}</span>`, esc(staffName.get(c.managerId) || '—'),
-        `<div style="display:flex;gap:6px;align-items:center;">
-           <input type="number" min="0" value="${c.applicantQuota ?? 25}" data-quota="${c.uuid}" style="width:90px;" />
-           <button class="primary" data-quota-save="${c.uuid}">Set</button>
-         </div>`
-      ])) || '<p class="muted">No CAs yet.</p>'}
+      <b>CA applicant quota</b>
+      <p class="muted">One shared limit for every Career Associate — there is no per-CA setting here. Choose <b>No limit</b>, or set a number and it is applied to <b>all ${caStaff.length} existing CA(s)</b> at once (and to any CA added while this stays set). New assignments are capped at that number unless it is No limit.</p>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+        <select id="ca-quota-mode" style="width:auto;">
+          <option value="none" ${globalCa.unlimited ? 'selected' : ''}>No limit</option>
+          <option value="limit" ${globalCa.unlimited ? '' : 'selected'}>Set a limit</option>
+        </select>
+        <input type="number" id="ca-quota-number" min="0" step="1"
+          value="${globalCa.unlimited ? '' : (globalCa.quota ?? '')}" placeholder="e.g. 25"
+          style="width:110px;${globalCa.unlimited ? 'display:none;' : ''}" />
+        <button class="primary" id="btn-ca-quota-global">Apply to all CAs</button>
+      </div>
+      <div id="ca-quota-out" class="muted small" style="margin-top:8px;">Currently: <b>${globalCa.unlimited ? 'No limit' : (globalCa.quota === null ? 'mixed (set one value to unify)' : `${globalCa.quota} per CA`)}</b> across ${caStaff.length} CA(s).</div>
     </div>
 
     <div class="card">
@@ -1553,16 +1565,30 @@ async function ingestLinkText(text, status) {
     } catch (err) { toast(err.message, true); }
   });
 
-  $('view').querySelectorAll('button[data-quota-save]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const uuid = btn.dataset.quotaSave;
-      const quota = Number(document.querySelector(`[data-quota="${uuid}"]`).value) || 0;
+  const quotaModeSel = $('ca-quota-mode');
+  const quotaNumInput = $('ca-quota-number');
+  if (quotaModeSel && quotaNumInput) {
+    quotaModeSel.addEventListener('change', () => {
+      quotaNumInput.style.display = quotaModeSel.value === 'limit' ? '' : 'none';
+    });
+    $('btn-ca-quota-global')?.addEventListener('click', async () => {
+      let payload;
+      if (quotaModeSel.value === 'none') {
+        payload = { quota: null };
+      } else {
+        const n = Number(quotaNumInput.value);
+        if (!Number.isFinite(n) || n < 0) {
+          return toast('Enter a valid limit (0 or more), or pick "No limit".', true);
+        }
+        payload = { quota: Math.floor(n) };
+      }
       try {
-        await api(`/api/dev/staff/${uuid}/quota`, { method: 'POST', body: JSON.stringify({ quota }) });
-        toast('Quota updated.');
+        const { global: g } = await api('/api/dev/ca-quota/global', { method: 'POST', body: JSON.stringify(payload) });
+        toast(g.unlimited ? 'No limit applied to all CAs.' : `Limit ${g.quota} applied to all CAs.`);
+        renderDevDataSync();
       } catch (err) { toast(err.message, true); }
     });
-  });
+  }
 
   $('btn-worker-on').addEventListener('click', () => setWorker(true));
   $('btn-worker-off').addEventListener('click', () => setWorker(false));

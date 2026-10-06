@@ -30,6 +30,8 @@ import {
   getUnassignedPool,
   getQuotaUsage,
   caQuotaUsage,
+  getGlobalCaQuota,
+  setGlobalCaQuota,
   assignApplicantToCa,
   listCasForManager,
   updateStaffQuota,
@@ -603,6 +605,8 @@ app.get('/api/activity', requireAuth, wrap(async (req) => {
 app.get('/api/dev/overview', requireAuth, requireRole('dev', 'admin'), wrap(async () => ({
   counters: await statusCounters({ role: 'dev' }),
   staff: (await listStaff()).map((s) => ({ uuid: s.uuid, email: s.email, name: s.name, role: s.role, managerId: s.manager_id, applicantQuota: s.applicant_quota, active: !!s.active, lastSignIn: s.last_sign_in })),
+  // The single shared CA quota the DEV dashboard edits (no per-CA control there).
+  caQuota: await getGlobalCaQuota(),
   system: {
     workerEnabled: await getSystemState('worker_enabled') === 'true',
     worker: await worker.workerStatus(),
@@ -1122,6 +1126,12 @@ async function ensureLinkInventory(app_) {
 
 app.post('/api/dev/staff/:uuid/quota', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => ({
   staff: await updateStaffQuota(req.params.uuid, req.body.quota)
+})));
+
+// The DEV single CA quota block: one value (a number, or null/"none" = No limit)
+// applied to EVERY existing CA at once, so all CAs share the same cap.
+app.post('/api/dev/ca-quota/global', requireAuth, requireRole('dev', 'admin'), wrap(async (req) => ({
+  global: await setGlobalCaQuota(req.body.quota)
 })));
 
 /* --------------------------- ADMIN routes -------------------------- */

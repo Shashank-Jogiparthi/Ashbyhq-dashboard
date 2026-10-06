@@ -597,15 +597,53 @@ export async function updateStaffQuota(staffUuid, quota) {
   return getStaff(staffUuid);
 }
 
+// A CA's applicant_quota is a plain integer cap, but a NEGATIVE value is the
+// "no limit" sentinel (the column is NOT NULL, so it cannot hold NULL). Every
+// reader treats any negative quota as "this CA is never capped at assignment".
+export function isUnlimitedQuota(raw) {
+  const n = Number(raw);
+  return !Number.isFinite(n) || n < 0;
+}
+
+// The DEV "CA applicant quota" control is a SINGLE value shared by every CA
+// (there is no per-CA editing there any more). Read the current global state
+// back off the rows: if any CA carries the negative sentinel the whole pool
+// reads as "no limit"; otherwise the shared number (null when legacy rows
+// disagree, so the control opens on a neutral state rather than a wrong one).
+export async function getGlobalCaQuota() {
+  const rows = await db.prepare("SELECT applicant_quota FROM staff WHERE role = 'ca'").all();
+  if (!rows.length) return { unlimited: true, quota: null, caCount: 0, mixed: false };
+  const vals = rows.map((r) => Number(r.applicant_quota));
+  if (vals.some((v) => isUnlimitedQuota(v))) return { unlimited: true, quota: null, caCount: rows.length, mixed: false };
+  const first = vals[0];
+  const mixed = !vals.every((v) => v === first);
+  return { unlimited: false, quota: mixed ? null : first, caCount: rows.length, mixed };
+}
+
+// Apply ONE quota to EVERY existing CA at once: a number caps each CA at that
+// many applicants, "no limit" stores the negative sentinel so none are capped.
+// This is what the DEV dashboard's single quota block drives.
+export async function setGlobalCaQuota(rawQuota) {
+  const unlimited = rawQuota === null || rawQuota === undefined || rawQuota === ''
+    || rawQuota === 'none' || Number(rawQuota) < 0;
+  const value = unlimited ? -1 : Math.max(0, Number(rawQuota) || 0);
+  const info = await db.prepare("UPDATE staff SET applicant_quota = ? WHERE role = 'ca'").run(value);
+  const updated = Number(info.changes ?? 0);
+  await logEvent(null, 'ca_quota_global_set', 'dev', { quota: unlimited ? 'none' : value, updated });
+  return { unlimited, quota: unlimited ? null : value, updated };
+}
+
 // A CA's OWN applicant limit (set by their OM, default 25) and how many
 // applicants currently sit with them. This - not a DEV-set ceiling on the OPS
-// manager - is what caps an assignment now.
+// manager - is what caps an assignment now. A negative stored value (or the DEV
+// global "no limit") means the CA is never capped.
 export async function caQuotaUsage(caUuid) {
   const ca = await getStaff(caUuid);
   const assigned = (await db.prepare(
     'SELECT COUNT(*) AS n FROM applicants WHERE ca_id = ?'
   ).get(caUuid)).n;
-  return { quota: ca?.applicant_quota ?? 25, assigned };
+  const quota = ca?.applicant_quota ?? 25;
+  return { quota, assigned, unlimited: isUnlimitedQuota(quota) };
 }
 
 // The OPS manager's central action: attach an unassigned applicant to one of
@@ -624,7 +662,9 @@ export async function assignApplicantToCa(awlId, caUuid, actor) {
     // this CA does not count twice. DEV/ADMIN may exceed it to rebalance.
     if (applicant.ca_id !== ca.uuid) {
       const usage = await caQuotaUsage(ca.uuid);
-      if (usage.assigned >= usage.quota) {
+      // A "no limit" CA (negative sentinel, set from the DEV global quota block)
+      // is never capped, so the assignment always goes through.
+      if (!usage.unlimited && usage.assigned >= usage.quota) {
         throw new HttpError(400, `${ca.name} is at their applicant limit (${usage.assigned}/${usage.quota}) — raise it in the CA view or pick another CA`);
       }
     }

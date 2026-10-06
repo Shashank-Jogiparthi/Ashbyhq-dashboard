@@ -1739,6 +1739,29 @@ async function verifyFiveStageAndIdentityFirst() {
     /includeDeadLinks = false/.test(storeSrc) &&
     /if \(!includeDeadLinks && \(user\.role === 'ca' \|\| user\.role === 'ops'\)\)/.test(storeSrc));
 
+  // --- Single shared CA applicant quota (replaces the DEV per-CA table).
+  const serverSrcQ = fs.readFileSync(SERVER_SCRIPT, 'utf8');
+  check('the DEV "Per-CA applicant quota" table is gone (no per-row quota inputs)',
+    !/Per-CA applicant quota/.test(appSrc) && !/data-quota-save/.test(appSrc));
+  check('the DEV dashboard exposes ONE global CA quota control ("No limit" + a number)',
+    /id="ca-quota-mode"/.test(appSrc) && /No limit/.test(appSrc) &&
+    /id="btn-ca-quota-global"/.test(appSrc) && /\/api\/dev\/ca-quota\/global/.test(appSrc));
+  check('setGlobalCaQuota fans one value out to EVERY CA row (role = ca)',
+    /export async function setGlobalCaQuota[\s\S]{0,600}UPDATE staff SET applicant_quota = \? WHERE role = 'ca'/.test(storeSrc));
+  check('"no limit" is the negative sentinel and getGlobalCaQuota reads it back',
+    /export async function getGlobalCaQuota/.test(storeSrc) &&
+    /isUnlimitedQuota/.test(storeSrc) && /const value = unlimited \? -1/.test(storeSrc));
+  check('caQuotaUsage reports an unlimited flag from the sentinel',
+    /caQuotaUsage[\s\S]{0,360}unlimited: isUnlimitedQuota\(quota\)/.test(storeSrc));
+  check('a No-limit CA is never capped at assignment',
+    /if \(!usage\.unlimited && usage\.assigned >= usage\.quota\)/.test(storeSrc));
+  check('the OPS pool dropdown shows an unlimited CA as ∞ and never "full"',
+    /unlimitedCa\(c\) \? '∞'/.test(appSrc) &&
+    /const atLimit = \(c\) => !unlimitedCa\(c\) && \(c\.assigned \?\? 0\) >= \(c\.applicant_quota \?\? 25\)/.test(appSrc));
+  check('the DEV overview ships the shared caQuota so the block opens on the real state',
+    /caQuota: await getGlobalCaQuota\(\)/.test(serverSrcQ) &&
+    /app\.post\('\/api\/dev\/ca-quota\/global'/.test(serverSrcQ));
+
   // --- Terminal-state rule: post-CA-submit runs resolve SUCCESS or FAILED.
   const runnerSrc2 = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'runner.js'), 'utf8');
   check('TERMINAL RULE: an unclear acknowledgement files FAILED, never PENDING',
