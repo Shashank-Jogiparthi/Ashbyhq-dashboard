@@ -997,65 +997,83 @@ async function verifyStaffDirectory() {
 }
 
 async function verifySignupRoles() {
-  step('8. Sign-up role gate (a NEW email must choose CA / OM / DEV; ADMIN and the 59 CA + admin emails never self-mint)');
+  step('8. Passwordless sign-in gate (fixed admin/dev, rostered members keep their role, a new email only via the staff/CA roster API)');
   const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'index.html');
   const html = fs.readFileSync(INDEX_HTML, 'utf8');
-  const sel = /<select id="role"[^>]*>([\s\S]*?)<\/select>/.exec(html);
-  const opts = sel ? [...sel[1].matchAll(/value="(\w+)"/g)].map((m) => m[1]) : [];
-  check('the sign-up form offers exactly CA / OM / DEV - ADMIN is not a choice',
-    sel && /\brequired\b/.test(sel[0]) && opts.join(',') === 'ca,ops,dev', opts.join(','));
-  const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
-  check('the request-code route runs every new-account role through assertSignupRole',
-    /const role = await assertSignupRole\(/.test(serverSrc)
-      && !/if \(role === 'admin' && \(await listStaff\('admin'\)\)\.length\)/.test(serverSrc));
-  check('ADMIN changes live only behind the admin-promotion endpoint, never sign-up',
-    /\/api\/admin\/staff\/:uuid\/role/.test(serverSrc) && !/createStaff\(\{[^}]*role: 'admin'/.test(serverSrc));
-
-  // --- PASSWORDLESS sign-in: the one-time code is gone end to end.
   const authSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'js', 'auth.js'), 'utf8');
-  check('request-code mints the session directly and returns a token (no code step)',
-    /const session = await createSession\(user\.uuid\)/.test(serverSrc) &&
-    /authenticated: true/.test(serverSrc) && /token: session\.token/.test(serverSrc));
-  check('request-code issues and mails no one-time code at all',
-    !/await issueOtp\(/.test(serverSrc) && !/await sendAuthCode\(/.test(serverSrc));
-  check('the sign-in panel stores the token and opens the dashboard straight away',
-    /out\.authenticated && out\.token/.test(authSrc) &&
+  const serverSrc = fs.readFileSync(SERVER_SCRIPT, 'utf8');
+
+  // The portal is now ONE email box: no code, no sign-in/sign-up split, no role picker.
+  check('the portal is a single email box - no role picker, no sign-up toggle, no code step',
+    /id="email"/.test(html) && !/id="role"/.test(html) && !/id="signup-fields"/.test(html) &&
+    !/id="tab-up"/.test(html) && !/id="step-code"/.test(html) && !/6-digit authenticator code/.test(html));
+  check('the sign-in script posts only the email (no mode / role / managerId) and stores the token',
+    /JSON\.stringify\(\{ email \}\)/.test(authSrc) && !/\$\('role'\)/.test(authSrc) &&
+    !/\$\('ops'\)/.test(authSrc) && !/managerId/.test(authSrc) &&
     /localStorage\.setItem\('awl_token', out\.token\)/.test(authSrc) &&
     /location\.href = '\/dashboard\.html'/.test(authSrc));
-  check('the portal markup no longer contains a code entry step',
-    !/id="step-code"/.test(html) && !/6-digit authenticator code/.test(html) && !/Send one-time code/.test(html));
+  check('request-code resolves the role through resolveSignInRole (no self-chosen signup role)',
+    /const gate = await resolveSignInRole\(email\)/.test(serverSrc) &&
+    !/const role = await assertSignupRole\(/.test(serverSrc));
+  check('request-code mints the session directly and issues/mails no one-time code',
+    /const session = await createSession\(user\.uuid\)/.test(serverSrc) && /authenticated: true/.test(serverSrc) &&
+    /token: session\.token/.test(serverSrc) && !/await issueOtp\(/.test(serverSrc) && !/await sendAuthCode\(/.test(serverSrc));
   check('neither the markup nor the script still asks for a one-time code',
-    !/Send one-time code/.test(authSrc) && !/verify-code/.test(authSrc));
+    !/Send one-time code/.test(authSrc) && !/verify-code/.test(authSrc) && !/Send one-time code/.test(html));
+  check('ADMIN role changes still live only behind the admin-promotion endpoint',
+    /\/api\/admin\/staff\/:uuid\/role/.test(serverSrc));
 
-  // Runtime proof on the exported gate itself. PORT is overridden BEFORE the
-  // import so this never collides with a dev server already on 3000.
+  // Runtime proof of the gate itself. PORT is overridden BEFORE the import so this
+  // never collides with a dev server already on 3000; caEmails is injected so the
+  // network is never touched.
   process.env.PORT = '53199';
-  const { assertSignupRole } = await import('../server.js');
-  const gate = async (email, role, adminLookup = false) => {
-    try { return { ok: await assertSignupRole({ email, role, adminLookup }) }; }
+  const { resolveSignInRole, SIGNIN_FIXED_ROLES, mapRosterRole } = await import('../server.js');
+  const { createStaff } = await import('../db/store.js');
+  const call = async (email, impl) => {
+    try { return { ok: await resolveSignInRole(email, { caEmailsImpl: impl }) }; }
     catch (e) { return { status: e.status, msg: e.message }; }
   };
-  const g1 = await gate('newhire@gmail.com', 'ca');
-  const g2 = await gate('newhire@gmail.com', 'OPS');
-  const g3 = await gate('newhire@gmail.com', 'dev');
-  check('a brand-new email may sign up as CA, OM(ops) or DEV - matched case-insensitively',
-    g1.ok === 'ca' && g2.ok === 'ops' && g3.ok === 'dev', JSON.stringify([g1, g2, g3]));
-  check('the OM label maps to the stored ops role (no separate "om" role exists)',
-    /value="ops">OM/.test(html));
-  const g4 = await gate('newhire@gmail.com', '');
-  const g5 = await gate('newhire@gmail.com', 'manager');
-  check('a missing or invented role is refused - choosing CA/OM/DEV is mandatory, never defaulted',
-    g4.status === 400 && g5.status === 400 && /CA, OM or DEV/.test(g4.msg), JSON.stringify([g4, g5]));
-  const g6 = await gate('stranger@gmail.com', 'admin');
-  check('ADMIN cannot be self-created by any email (the bootstrap sign-up is gone)',
-    g6.status === 403 && /ADMIN is not a sign-up choice|already has an ADMIN/.test(g6.msg), g6.msg);
-  const g7 = await gate('balaji@applywizz.ai', 'admin', true);
-  check('an existing ADMIN email is pointed at Sign in, not a second ADMIN account',
-    g7.status === 403 && /Switch to "Sign in"/.test(g7.msg), g7.msg);
-  const g8 = await gate(' RathnamalaM@Applywizz.com ', 'ca');
-  const g9 = await gate('someone@applywizz.ai', 'dev');
-  check('the grandfathered org emails (59 CAs, admins) can never self-mint a role',
-    g8.status === 403 && g9.status === 403 && /Switch to "Sign in"/.test(g8.msg), JSON.stringify([g8, g9]));
+  const boom = async () => { throw new Error('network down'); };
+  const notConfigured = async () => ({ ok: false, skipped: 'not_configured', users: [] });
+
+  check('shashank is FIXED to DEV and the two admins are FIXED to ADMIN regardless of roster/API',
+    SIGNIN_FIXED_ROLES['shashankjogiparthi@applywizz.ai'] === 'dev' &&
+    SIGNIN_FIXED_ROLES['anushabandreddy@applywizz.ai'] === 'admin' &&
+    SIGNIN_FIXED_ROLES['ramakrishna@applywizz.ai'] === 'admin');
+  const fx1 = await call(' shashankjogiparthi@applywizz.ai ', boom);
+  const fx2 = await call('AnushaBandreddy@Applywizz.ai', boom);
+  check('a fixed email resolves to its fixed role even when the roster API is down',
+    fx1.ok?.role === 'dev' && fx1.ok?.fixed === true && fx2.ok?.role === 'admin', JSON.stringify([fx1, fx2]));
+  check('the API role label maps onto the four stored roles',
+    mapRosterRole('Admin') === 'admin' && mapRosterRole('dev') === 'dev' &&
+    mapRosterRole('Operations Manager') === 'ops' && mapRosterRole('CA') === 'ca' && mapRosterRole('') === 'ca');
+
+  // A rostered member keeps their stored role and survives an API outage.
+  await createStaff({ email: 'verify-signin-rostered@applywizz.com', role: 'ops', name: 'Verify Rostered OM' });
+  const r1 = await call('verify-signin-rostered@applywizz.com', boom);
+  check('a rostered email signs in with its STORED role and is never locked out by an API outage',
+    r1.ok?.role === 'ops' && r1.ok?.rostered === true, JSON.stringify(r1));
+
+  // A brand-new email only gets in if the staff/CA roster API lists it, and takes that role.
+  const listedImpl = async () => ({ ok: true, users: [
+    { email: 'Verify-NewCA@applywizz.com', role: 'CA', name: 'Verify New CA' },
+    { email: 'someone@partner.com', role: 'Senior Career Associate', name: 'Partner Guy' }
+  ] });
+  const n1 = await call('verify-newca@applywizz.com', listedImpl);
+  const n2 = await call('someone@partner.com', listedImpl);
+  check('a brand-new email that IS on the staff roster is admitted with the roster role (matched case-insensitively)',
+    n1.ok?.role === 'ca' && n1.ok?.fromRoster === true && n2.ok?.role === 'ca', JSON.stringify([n1, n2]));
+  const n3 = await call('total-stranger@random-mail.com', listedImpl);
+  check('an email that is NOT on the staff roster is refused (no dashboard access)',
+    n3.status === 403 && /not on the approved staff roster/.test(n3.msg), JSON.stringify(n3));
+  const n4 = await call('brand-new@nowhere.com', boom);
+  const n5 = await call('brand-new@nowhere.com', notConfigured);
+  check('when the roster API is unreachable or unconfigured a NEW email is failed closed',
+    n4.status === 503 && n5.status === 503, JSON.stringify([n4, n5]));
+  const r2 = await call('verify-signin-rostered@applywizz.com', notConfigured);
+  check('the fail-closed path never affects a rostered member (the local roster is the outage fallback)',
+    r2.ok?.rostered === true, JSON.stringify(r2));
+
 }
 
 async function verifyDeadFixtures() {

@@ -132,6 +132,66 @@ export function assertSignupRole({ email, role, adminLookup }) {
   return Promise.resolve(r);
 }
 
+/* ---------------- PASSWORDLESS SIGN-IN ROLE GATE (v3.7k) -------------------
+   There is no verification code any more, so WHO may open a dashboard - and at
+   what role - is decided here, from the email alone:
+
+   1. A small FIXED set is always honoured regardless of anything else: the two
+      ADMINs and shashankjogiparthi@applywizz.ai as DEV. These never depend on a
+      roster read or the network.
+   2. Any email already ROSTERED in our staff table signs in with its STORED
+      role. This keeps the 2 OM managers and every existing CA (and any other
+      DEV) working, and is the "allow the local roster on an API outage" safety
+      net the operator asked for - a rostered member is never locked out because
+      an external call failed.
+   3. A brand-new, NOT-rostered email gets in ONLY if it is listed by the
+      external staff/CA API ({ca_mgmt_base}/api/ca/emails), and takes the role
+      that API reports (CA by default). If it is not listed, access is refused.
+      If that API is unreachable/not configured, a new email is refused too
+      (fail-closed): only rostered members can sign in while it is down.
+
+   The external call is injected ({ caEmailsImpl }) so verify:flow drives it with
+   a fixture and never touches the network. */
+export const SIGNIN_FIXED_ROLES = {
+  'shashankjogiparthi@applywizz.ai': 'dev',
+  'anushabandreddy@applywizz.ai': 'admin',
+  'ramakrishna@applywizz.ai': 'admin'
+};
+
+// The API's free-text role label mapped onto our four stored roles.
+export function mapRosterRole(raw) {
+  const r = String(raw || '').toLowerCase();
+  if (r.includes('admin')) return 'admin';
+  if (r.includes('dev')) return 'dev';
+  if (r.includes('om') || r.includes('ops') || r.includes('manager')) return 'ops';
+  return 'ca';
+}
+
+export async function resolveSignInRole(email, { caEmailsImpl = caEmails } = {}) {
+  const e = normalizeEmail(email);
+  if (SIGNIN_FIXED_ROLES[e]) return { role: SIGNIN_FIXED_ROLES[e], name: null, fixed: true };
+  const existing = await findStaffByEmail(e);
+  if (existing) return { role: existing.role, name: existing.name, rostered: true };
+  let listed;
+  try {
+    listed = await caEmailsImpl();
+  } catch (err) {
+    throw new HttpError(503,
+      `Cannot verify a new address right now: the staff-roster (CA-emails) API is unreachable (${err.message || err}). Existing team members can still sign in.`);
+  }
+  if (!listed || listed.skipped === 'not_configured' || listed.ok === false) {
+    throw new HttpError(503,
+      'The staff-roster (CA-emails) API is not configured on this host, so a new address cannot be verified. Existing team members sign in normally.');
+  }
+  const users = Array.isArray(listed.users) ? listed.users : [];
+  const found = users.find((u) => normalizeEmail(u && u.email) === e);
+  if (!found) {
+    throw new HttpError(403,
+      'This email is not on the approved staff roster, so no dashboard access is granted.');
+  }
+  return { role: mapRosterRole(found.role), name: found.name || null, fromRoster: true };
+}
+
 // OPS-tree endpoints a DEV/ADMIN may view for any manager by uuid.
 function managerScopeUuid(req) {
   if ((req.user.role === 'dev' || req.user.role === 'admin') && req.query.managerId) return req.query.managerId;
@@ -236,15 +296,14 @@ function handleError(res, error) {
 
 /* ----------------------------- auth ------------------------------- */
 
-// Sign-in / sign-up entry point. PASSWORDLESS in this build: it resolves (or
-// creates) the account, then mints the session token directly and returns it —
-// no one-time code is issued or mailed, and the portal logs straight in.
-// The portal sends an explicit `mode`: SIGN IN never creates an account and
-// SIGN UP never logs into an existing one. Defaulting to 'signup' keeps older
-// callers (and the CLI helpers) working unchanged.
-// NOTE: role is still self-selected on sign-up and this endpoint answers with
-// { isNewAccount, role }, so it remains an enumeration oracle. Gating
-// (invite-only / admin-approved) is still required before this is hardened.
+// Sign-in / sign-up entry point. PASSWORDLESS: it resolves the account from the
+// email alone and mints the session token directly and returns it — no one-time
+// code is issued or mailed, and the portal logs straight in.
+// WHO may open a dashboard, and at what role, is decided by resolveSignInRole:
+// the fixed ADMIN/DEV emails, any already-rostered member (stored role), or —
+// for a brand-new address — a listing in the external staff/CA API. An email the
+// roster does not know and the API does not list is refused (403), so this is no
+// longer an open self-registration oracle.
 app.post('/api/auth/request-code', wrap(async (req) => {
   const email = await normalizeEmail(req.body.email);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, 'Enter a valid email address');
@@ -252,36 +311,22 @@ app.post('/api/auth/request-code', wrap(async (req) => {
   // test addresses (rakesh@, priya.cam@ and any other) can neither sign in nor
   // sign up, so reject them as invalid mail before any account lookup happens.
   if (isForbiddenLoginEmail(email)) throw new HttpError(400, 'Invalid mail: this address is retired and can no longer sign in or sign up.');
-  const mode = String(req.body.mode || 'signup').toLowerCase() === 'signin' ? 'signin' : 'signup';
 
+  // The email alone decides the role (fixed admins/dev, rostered member, or the
+  // external staff API for a new address). No sign-in/sign-up split, no role pick.
+  const gate = await resolveSignInRole(email);
   let user = await findStaffByEmail(email);
   let isNewAccount = false;
   if (!user) {
-    if (mode === 'signin') {
-      throw new HttpError(404, 'No account found for that email. Switch to "Sign up" to create one.');
-    }
-    const role = await assertSignupRole({
-      email,
-      role: req.body.role,
-      adminLookup: (await listStaff('admin')).some((a) => a.email === email)
-    });
-    let managerId = req.body.managerId || null;
-    if (role === 'ca') {
-      const opsList = await listStaff('ops');
-      if (opsList.length && !managerId) throw new HttpError(400, 'Select your OM manager to complete sign-up');
-      if (managerId && !opsList.some((o) => o.uuid === managerId)) throw new HttpError(400, 'Unknown OM manager');
-    } else {
-      managerId = null;
-    }
-    // No name field on the form any more: createStaff derives the display name
-    // from the email address, and still honours `name` for API/ingest callers.
-    user = await createStaff({ email, name: req.body.name, role, managerId });
+    user = await createStaff({ email, name: gate.name || req.body.name, role: gate.role });
     isNewAccount = true;
-  } else if (mode === 'signup') {
-    throw new HttpError(409, 'An account already exists for that email. Switch to "Sign in".');
-  } else if (user.role === 'ca' && !user.manager_id && req.body.managerId) {
-    await updateStaffManager(user.uuid, req.body.managerId);
-    user = await getStaff(user.uuid);
+  } else if (gate.fixed && user.role !== gate.role) {
+    // Honour the fixed mapping even for an already-rostered address (e.g. make
+    // shashank DEV). Guarded so a store quirk never blocks a known member.
+    try {
+      await updateStaffRole(user.uuid, gate.role, { uuid: user.uuid });
+      user = await getStaff(user.uuid);
+    } catch { /* keep whatever role it already had */ }
   }
 
   // PASSWORDLESS (temporary): no one-time code is issued or mailed any more.

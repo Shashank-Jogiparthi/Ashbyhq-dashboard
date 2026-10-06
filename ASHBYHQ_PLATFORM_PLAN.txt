@@ -2011,3 +2011,37 @@ verify:flow step 15 grows from 43 to 56 checks: the compact-mode check now
   display tables stay ABSENT, and that the applicant-JSON block is gone
   (replacing the two old "must be absent" controls checks). 372 checks pass.
 
+====================================================================
+31. v3.7k - ROSTER-GATED PASSWORDLESS SIGN-IN (NO CODE, NO ROLE PICKER)
+
+  With no verification code, the email alone must decide WHO gets a dashboard
+  and at what role. The open self-registration (sign-up role picker) is removed
+  and replaced by a single gate, resolveSignInRole(email), used by
+  /api/auth/request-code:
+
+   1. FIXED set, honoured regardless of anything else (no roster read, no
+      network): shashankjogiparthi@applywizz.ai -> DEV, and the two ADMINs
+      (anushabandreddy@applywizz.ai, ramakrishna@applywizz.ai) -> ADMIN.
+   2. Any email already ROSTERED in staff signs in with its STORED role. This
+      keeps the 2 OM managers + every existing CA + any other DEV working, and
+      is the "allow the local roster on an API outage" fallback: a rostered
+      member is never locked out because an external call failed.
+   3. A brand-new, un-rostered email gets in ONLY if it is listed by the
+      external staff/CA API ({ca_mgmt_base}/api/ca/emails) and takes the role
+      that API reports (mapRosterRole -> ca/ops/dev/admin, CA by default).
+      Not listed -> 403 "not on the approved staff roster". API unreachable
+      or unconfigured -> 503 fail-CLOSED for a new email (existing members are
+      unaffected, they resolve in step 2 before the network is ever touched).
+
+  CLIENT: index.html collapses to ONE email box (the sign-in/sign-up tabs, the
+  role <select>, and the OM-manager <select> are deleted); auth.js POSTs only
+  { email }, stores the returned token, and opens the dashboard. The route still
+  mints the session directly and issues/mails no code.
+
+  The API call is injected ({ caEmailsImpl }) so verify:flow drives every branch
+  with fixtures and never touches the network. verify step 8 is rewritten (14
+  checks): single email box, email-only POST, gate wired through
+  resolveSignInRole, fixed admin/dev, role-label mapping, rostered-keeps-role +
+  outage fallback, listed new email admitted, unlisted refused 403, unreachable
+  API failed closed. 372 checks pass.
+
