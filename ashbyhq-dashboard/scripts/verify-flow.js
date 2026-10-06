@@ -1728,10 +1728,17 @@ async function verifyFiveStageAndIdentityFirst() {
 
   // --- DEV dashboard removals (the user asked for these surfaces gone, not
   //     hidden behind a toggle: they must never render again).
-  check('DEV Data Sync no longer renders the "Job links (AWL-ID → link)" card at all',
-    !/Job links \(AWL-ID/.test(appSrc) && !/btn-csv-ingest/.test(appSrc) && !/links-csv/.test(appSrc));
-  check('DEV Data Sync no longer renders the "ashby_joblink_questions" table',
-    !/ashby_joblink_questions \(link/.test(appSrc) && !/btn-add-links/.test(appSrc));
+  check('DEV Data Sync re-offers the job-link ingest: .csv upload AND manual paste',
+    /id="links-csv"/.test(appSrc) && /id="btn-csv-ingest"/.test(appSrc) &&
+    /id="links-paste"/.test(appSrc) && /id="btn-add-links"/.test(appSrc) &&
+    /async function ingestLinkText/.test(appSrc) && /\/api\/dev\/links/.test(appSrc));
+  check('the job-link / question DISPLAY tables stay removed (only the ingest controls returned)',
+    !/ashby_joblink_questions \(link/.test(appSrc) &&
+    !/tableHtml\(\['AWL-ID', 'job_links'\]/.test(appSrc) &&
+    !/links with no question inventory yet/.test(appSrc));
+  check('the "Ingest one applicant document (JSON)" block is removed from DEV Data Sync',
+    !/Ingest one applicant document/.test(appSrc) && !/id="ingest-json"/.test(appSrc) &&
+    !/btn-ingest/.test(appSrc) && !/\/api\/dev\/ingest/.test(appSrc));
   check('the Pre-scan worker card no longer lists "links with no question inventory yet"',
     !/links with no question inventory yet/.test(appSrc));
   check('the Pre-scan worker card caps its recent-links table at the last 5',

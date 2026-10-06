@@ -1374,7 +1374,6 @@ async function renderDevDataSync() {
     api('/api/dev/overview'),
     api('/api/dev/scan-queue').catch(() => ({ counts: {}, running: [], recent: [], unscanned: [] }))
   ]);
-  const opsStaff = data.staff.filter((s) => s.role === 'ops');
   const caStaff = data.staff.filter((s) => s.role === 'ca');
   // The single shared CA quota (the DEV block edits one value for every CA).
   // Authoritative from the server; fall back to deriving from the CA rows so an
@@ -1411,18 +1410,30 @@ async function renderDevDataSync() {
     ${preScanQueueCard(queue)}
 
     <div class="card" style="margin-bottom:14px;">
-      <b>Ingest one applicant document (JSON)</b>
-      <p class="muted">Paste the <span class="mono">{ client, additional_information }</span> export to load a single
-        applicant now, without a live DB. Attach to an OPS manager so it lands in their assignment pool.</p>
-      <div style="max-width:340px;margin-bottom:8px;">
-        <select id="ingest-ops"><option value="">— shared pool (no OPS manager) —</option>
-          ${opsStaff.map((c) => `<option value="${c.uuid}">${esc(c.name)} — ${esc(c.email)}</option>`).join('')}
-        </select>
+      <b>Ingest job links (AWL-ID → link)</b>
+      <p class="muted">Upload a <span class="mono">.csv</span> export — one row per assignment, with an
+        AWL-ID column and a job-link column. Column names are matched loosely
+        (<span class="mono">applywizz_id / awl_id / awl / id</span> and
+        <span class="mono">job_link / url / link / apply_url</span>), quoted cells, <span class="mono">.tsv</span>
+        and <span class="mono">;</span>/<span class="mono">|</span> delimiters are handled, and
+        <span class="mono">company / title</span> are used when present. Every row is appended to
+        <span class="mono">ashby_joblinks</span> in the CRM, the link is registered once in
+        <span class="mono">ashby_joblink_questions</span>, and a link with no cached questions yet is
+        <b>pre-scanned automatically</b> in the background — big files go in batches so the request never times out.</p>
+      <div class="actions" style="align-items:center;flex-wrap:wrap;gap:10px;">
+        <label class="btn green">⇧ Choose .csv
+          <input type="file" id="links-csv" accept=".csv,.tsv,.txt,text/csv,text/plain" hidden />
+        </label>
+        <span class="muted small" id="csv-name">no file chosen</span>
+        <button class="primary" id="btn-csv-ingest" disabled>⇧ Ingest file</button>
       </div>
-      <textarea id="ingest-json" rows="8" style="width:100%;font-family:monospace;font-size:12px;"
-        placeholder='{ "client": { "applywizz_id": "AWL-9999", "full_name": "..." }, "additional_information": { ... } }'></textarea>
-      <div class="actions"><button class="green" id="btn-ingest">⤓ Ingest applicant</button></div>
-      <div id="ingest-out" class="muted" style="margin-top:8px;"></div>
+      <details style="margin-top:10px;">
+        <summary class="muted small">…or paste lines (one pair per line, any spacing, # ignored)</summary>
+        <textarea id="links-paste" rows="4" style="width:100%;font-family:monospace;font-size:12px;margin-top:8px;"
+          placeholder="AWL-101  https://jobs.ashbyhq.com/acme/4e64ab86-4e30-403b-b1b9-41dc052570ce&#10;AWL-102  https://jobs.ashbyhq.com/acme/4e64ab86-4e30-403b-b1b9-41dc052570ce"></textarea>
+        <div class="actions"><button class="green" id="btn-add-links">⇧ Add job links</button></div>
+      </details>
+      <div id="links-out" class="muted" style="margin-top:8px;"></div>
     </div>
 
     <div class="card" style="margin-bottom:14px;">
@@ -1554,15 +1565,43 @@ async function ingestLinkText(text, status) {
   return bits.join('<br>');
 }
 
-  $('btn-ingest').addEventListener('click', async () => {
-    let doc;
-    try { doc = JSON.parse($('ingest-json').value); }
-    catch { return toast('Invalid JSON in the textarea.', true); }
+  $('btn-add-links').addEventListener('click', async () => {
+    const text = $('links-paste').value.trim();
+    if (!text) return toast('Paste at least one "AWL-ID  <job link>" line.', true);
+    $('btn-add-links').disabled = true;
     try {
-      const { ingest } = await api('/api/dev/ingest', { method: 'POST', body: JSON.stringify({ doc, opsId: $('ingest-ops').value || null }) });
-      $('ingest-out').textContent = `Ingested ${ingest.created ? 'new applicant' : 'updated'} with ${ingest.links} job link(s).`;
-      toast('Applicant ingested into the pool.');
-    } catch (err) { toast(err.message, true); }
+      const summary = await ingestLinkText(text, $('links-out'));
+      // Refresh FIRST, then write: renderDevDataSync() replaces the whole pane,
+      // so a summary put up before it would be wiped along with the paste box.
+      await renderDevDataSync();
+      $('links-out').innerHTML = summary;
+      toast('Job links saved.');
+    } catch (err) { const el = $('links-out'); if (el) el.textContent = ''; toast(err.message, true); }
+    const btn = $('btn-add-links');
+    if (btn) btn.disabled = false;
+  });
+
+  // Choosing a file only names it; writing to the CRM needs the second click, so
+  // a misclick on the wrong export cannot push assignments anywhere.
+  $('links-csv').addEventListener('change', () => {
+    const file = $('links-csv').files?.[0];
+    $('csv-name').textContent = file ? `${file.name} · ${(file.size / 1024).toFixed(1)} KB` : 'no file chosen';
+    $('btn-csv-ingest').disabled = !file;
+    $('links-out').textContent = '';
+  });
+
+  $('btn-csv-ingest').addEventListener('click', async () => {
+    const file = $('links-csv').files?.[0];
+    if (!file) return toast('Choose a .csv first.', true);
+    $('btn-csv-ingest').disabled = true;
+    try {
+      const summary = await ingestLinkText(await file.text(), $('links-out'));
+      await renderDevDataSync();          // re-render before the summary survives
+      $('links-out').innerHTML = summary;
+      toast(`${file.name} ingested.`);
+    } catch (err) { const el = $('links-out'); if (el) el.textContent = ''; toast(err.message, true); }
+    const btn = $('btn-csv-ingest');
+    if (btn) btn.disabled = false;
   });
 
   const quotaModeSel = $('ca-quota-mode');
